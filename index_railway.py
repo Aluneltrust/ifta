@@ -26,11 +26,34 @@ from flask_cors import CORS, cross_origin
 # =============================================================================
 app = Flask(__name__)
 
+# CORS Configuration - Handle preflight requests properly
 CORS(app, 
-     origins="*",
-     allow_headers=["Content-Type", "Authorization", "Accept"],
+     resources={r"/api/*": {"origins": "*"}},
+     allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
      supports_credentials=True,
      methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"])
+
+# Explicit OPTIONS handler for all /api/* routes
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        headers = response.headers
+        headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+        headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept, Origin, X-Requested-With'
+        headers['Access-Control-Allow-Credentials'] = 'true'
+        headers['Access-Control-Max-Age'] = '3600'
+        return response
+
+@app.after_request
+def after_request(response):
+    origin = request.headers.get('Origin', '*')
+    response.headers['Access-Control-Allow-Origin'] = origin
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept, Origin, X-Requested-With'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    return response
 
 logging.basicConfig(
     level=logging.INFO,
