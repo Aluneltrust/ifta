@@ -46,6 +46,13 @@ SECRET_KEY = os.environ.get('JWT_SECRET', secrets.token_hex(32))
 DATABASE_URL = os.environ.get('DATABASE_URL')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
+# Square Payment Configuration
+SQUARE_ACCESS_TOKEN = os.environ.get('SQUARE_ACCESS_TOKEN')
+SQUARE_LOCATION_ID = os.environ.get('SQUARE_LOCATION_ID')
+SQUARE_ENVIRONMENT = os.environ.get('SQUARE_ENVIRONMENT', 'sandbox')  # 'sandbox' or 'production'
+
+# Square API URLs
+SQUARE_API_URL = 'https://connect.squareupsandbox.com' if SQUARE_ENVIRONMENT == 'sandbox' else 'https://connect.squareup.com'
 
 
 # =============================================================================
@@ -85,6 +92,23 @@ def init_database():
             )
         ''')
         
+        # Add payments table for tracking
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                amount DECIMAL(10,2) NOT NULL,
+                credits INTEGER NOT NULL,
+                bonus_credits INTEGER DEFAULT 0,
+                total_credits INTEGER NOT NULL,
+                square_payment_id VARCHAR(255),
+                square_checkout_id VARCHAR(255),
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP
+            )
+        ''')
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -109,7 +133,7 @@ def create_response(status="success", message="", data=None, errors=None, status
         "timestamp": datetime.now().isoformat()
     }
     if data is not None:
-        response_data["data"] = data
+        response_data.update(data)  # Merge data into response for backwards compatibility
     if errors is not None:
         response_data["errors"] = errors
     return jsonify(response_data), status_code
@@ -451,6 +475,69 @@ def cleanup_expired_tokens():
 
 
 # =============================================================================
+# PAYMENT DATABASE OPERATIONS
+# =============================================================================
+def create_payment_record(email, amount, credits, bonus_credits, total_credits, checkout_id=None):
+    """Create a payment record"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute('''
+            INSERT INTO payments (email, amount, credits, bonus_credits, total_credits, square_checkout_id, status, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+            RETURNING id
+        ''', (email, amount, credits, bonus_credits, total_credits, checkout_id, datetime.now()))
+        
+        payment_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"Payment record created: {payment_id} for {email}")
+        return payment_id
+    except Exception as e:
+        logger.error(f"Error creating payment record: {e}")
+        return None
+
+
+def complete_payment(checkout_id, square_payment_id=None):
+    """Mark payment as completed and add credits"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Get payment record
+        cur.execute('''
+            SELECT * FROM payments WHERE square_checkout_id = %s AND status = 'pending'
+        ''', (checkout_id,))
+        payment = cur.fetchone()
+        
+        if not payment:
+            cur.close()
+            conn.close()
+            logger.warning(f"Payment not found or already completed: {checkout_id}")
+            return False
+        
+        # Update payment status
+        cur.execute('''
+            UPDATE payments SET status = 'completed', square_payment_id = %s, completed_at = %s
+            WHERE square_checkout_id = %s
+        ''', (square_payment_id, datetime.now(), checkout_id))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        # Add credits to user
+        add_user_credits(payment['email'], payment['total_credits'])
+        logger.info(f"Payment completed: {checkout_id}, added {payment['total_credits']} credits to {payment['email']}")
+        return True
+    except Exception as e:
+        logger.error(f"Error completing payment: {e}")
+        return False
+
+
+# =============================================================================
 # EMAIL FUNCTIONS
 # =============================================================================
 def send_email(to_email, subject, html_content):
@@ -547,11 +634,12 @@ def health_check():
         status="success",
         message="Railway User Management API",
         data={
-            "version": "2.3.0",
+            "version": "2.4.0",
             "service": "user_management",
-            "features": ["auth", "credits", "email_password_reset"],
+            "features": ["auth", "credits", "email_password_reset", "square_payments"],
             "database": "postgresql",
-            "email_configured": bool(os.environ.get('RESEND_API_KEY'))
+            "email_configured": bool(os.environ.get('RESEND_API_KEY')),
+            "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)
         }
     )
 
@@ -559,9 +647,11 @@ def health_check():
 # =============================================================================
 # ROUTES: AUTHENTICATION
 # =============================================================================
-@app.route('/api/auth/register', methods=['POST'])
+@app.route('/api/auth/register', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def register():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         if not request.is_json:
             return create_response("error", "Content-Type must be application/json", status_code=400)
@@ -598,9 +688,11 @@ def register():
         return create_response("error", "Registration failed", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/auth/login', methods=['POST'])
+@app.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def login():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         if not request.is_json:
             return create_response("error", "Content-Type must be application/json", status_code=400)
@@ -639,9 +731,11 @@ def login():
         return create_response("error", "Login failed", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/auth/verify', methods=['GET'])
+@app.route('/api/auth/verify', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def verify():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         token = extract_token_from_request()
         if not token:
@@ -674,9 +768,11 @@ def verify():
 # =============================================================================
 # ROUTES: PASSWORD RESET
 # =============================================================================
-@app.route('/api/auth/forgot-password', methods=['POST'])
+@app.route('/api/auth/forgot-password', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def forgot_password():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         data = request.get_json()
         if not data or 'email' not in data:
@@ -720,9 +816,11 @@ def forgot_password():
         return create_response("error", "Internal server error", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/auth/reset-password', methods=['POST'])
+@app.route('/api/auth/reset-password', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def reset_password():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         data = request.get_json()
         if not data or 'token' not in data or 'password' not in data:
@@ -755,9 +853,11 @@ def reset_password():
         return create_response("error", "Internal server error", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/auth/change-password', methods=['POST'])
+@app.route('/api/auth/change-password', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def change_password():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         data = request.get_json()
         if not data:
@@ -794,17 +894,26 @@ def change_password():
 # =============================================================================
 # ROUTES: CREDITS
 # =============================================================================
-@app.route('/api/credits/balance', methods=['GET'])
+@app.route('/api/credits/balance', methods=['GET', 'POST', 'OPTIONS'])
 @cross_origin()
 def get_balance():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
-        token = extract_token_from_request()
-        if not token:
-            return create_response("error", "Authentication required", status_code=401)
-        
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
+        # Support both GET (with token) and POST (with email in body)
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            email = data.get('email', '').strip().lower()
+            if not email:
+                return create_response("error", "Email required", status_code=400)
+        else:
+            token = extract_token_from_request()
+            if not token:
+                return create_response("error", "Authentication required", status_code=401)
+            
+            email = verify_token(token)
+            if not email:
+                return create_response("error", "Invalid or expired token", status_code=401)
         
         credits = get_user_credits(email)
         return create_response("success", "Balance retrieved", data={"credits": credits, "email": email})
@@ -813,9 +922,11 @@ def get_balance():
         return create_response("error", "Failed to get balance", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/credits/use', methods=['POST'])
+@app.route('/api/credits/use', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def use_credit():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         logger.info("=" * 60)
         logger.info("CREDIT USE ENDPOINT CALLED")
@@ -884,9 +995,11 @@ def use_credit():
         return create_response("error", "Failed to use credits", errors=[str(e)], status_code=500)
 
 
-@app.route('/api/credits/add', methods=['POST'])
+@app.route('/api/credits/add', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def add_credits():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         if not request.is_json:
             return create_response("error", "Content-Type must be application/json", status_code=400)
@@ -918,11 +1031,216 @@ def add_credits():
 
 
 # =============================================================================
+# ROUTES: PAYMENTS (Square Integration)
+# =============================================================================
+@app.route('/api/payment/checkout-link', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def create_checkout_link():
+    """Create a Square checkout link for credit purchase"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
+        email = data.get('email', '').strip().lower()
+        amount = data.get('amount', 0)
+        credits = data.get('credits', 0)
+        bonus_credits = data.get('bonusCredits', 0)
+        total_credits = data.get('totalCredits', 0)
+        
+        logger.info(f"Checkout request: email={email}, amount={amount}, credits={credits}, bonus={bonus_credits}, total={total_credits}")
+        
+        if not validate_email(email):
+            return create_response("error", "Invalid email", status_code=400)
+        
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                return create_response("error", "Amount must be positive", status_code=400)
+        except (ValueError, TypeError):
+            return create_response("error", "Invalid amount", status_code=400)
+        
+        # Check if Square is configured
+        if not SQUARE_ACCESS_TOKEN or not SQUARE_LOCATION_ID:
+            logger.warning("Square not configured, using test mode")
+            # Test mode - directly add credits
+            new_balance = add_user_credits(email, total_credits)
+            return create_response(
+                "success",
+                "Test mode - credits added directly",
+                data={
+                    "success": True,
+                    "testMode": True,
+                    "credits": new_balance,
+                    "added": total_credits
+                }
+            )
+        
+        # Create payment record
+        checkout_id = str(uuid.uuid4())
+        payment_id = create_payment_record(email, amount, credits, bonus_credits, total_credits, checkout_id)
+        
+        if not payment_id:
+            return create_response("error", "Failed to create payment record", status_code=500)
+        
+        # Create Square checkout
+        try:
+            amount_cents = int(amount * 100)
+            
+            checkout_payload = {
+                "idempotency_key": checkout_id,
+                "order": {
+                    "order": {
+                        "location_id": SQUARE_LOCATION_ID,
+                        "line_items": [
+                            {
+                                "name": f"{total_credits} IFTA Credits",
+                                "quantity": "1",
+                                "base_price_money": {
+                                    "amount": amount_cents,
+                                    "currency": "USD"
+                                },
+                                "note": f"Credits: {credits}, Bonus: {bonus_credits}"
+                            }
+                        ]
+                    }
+                },
+                "checkout_options": {
+                    "redirect_url": f"{FRONTEND_URL}/#/payment-success?checkout_id={checkout_id}",
+                    "merchant_support_email": "support@carriermiles.com"
+                },
+                "pre_populate_buyer_email": email
+            }
+            
+            response = requests.post(
+                f"{SQUARE_API_URL}/v2/online-checkout/payment-links",
+                headers={
+                    "Square-Version": "2024-01-18",
+                    "Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                json=checkout_payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                checkout_url = result.get('payment_link', {}).get('url')
+                
+                if checkout_url:
+                    logger.info(f"Square checkout created: {checkout_url}")
+                    return create_response(
+                        "success",
+                        "Checkout link created",
+                        data={
+                            "success": True,
+                            "checkoutUrl": checkout_url,
+                            "checkoutId": checkout_id
+                        }
+                    )
+                else:
+                    logger.error(f"No checkout URL in response: {result}")
+                    return create_response("error", "Failed to get checkout URL", status_code=500)
+            else:
+                logger.error(f"Square API error: {response.status_code} - {response.text}")
+                return create_response("error", f"Square API error: {response.status_code}", status_code=500)
+                
+        except requests.exceptions.Timeout:
+            logger.error("Square API timeout")
+            return create_response("error", "Payment service timeout", status_code=504)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Square API request error: {e}")
+            return create_response("error", "Payment service error", status_code=502)
+            
+    except Exception as e:
+        logger.error(f"Checkout link error: {e}", exc_info=True)
+        return create_response("error", "Failed to create checkout", errors=[str(e)], status_code=500)
+
+
+@app.route('/api/payment/webhook', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def payment_webhook():
+    """Handle Square payment webhooks"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        data = request.get_json()
+        logger.info(f"Webhook received: {json.dumps(data, indent=2)}")
+        
+        event_type = data.get('type')
+        
+        if event_type == 'payment.completed':
+            payment_data = data.get('data', {}).get('object', {}).get('payment', {})
+            checkout_id = payment_data.get('reference_id')
+            square_payment_id = payment_data.get('id')
+            
+            if checkout_id:
+                complete_payment(checkout_id, square_payment_id)
+                logger.info(f"Payment webhook processed: {checkout_id}")
+        
+        return create_response("success", "Webhook received")
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return create_response("error", "Webhook processing failed", status_code=500)
+
+
+@app.route('/api/payment/verify', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def verify_payment():
+    """Verify a payment by checkout ID"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        data = request.get_json()
+        checkout_id = data.get('checkoutId')
+        
+        if not checkout_id:
+            return create_response("error", "Checkout ID required", status_code=400)
+        
+        # Check payment status in database
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        cur.execute('''
+            SELECT * FROM payments WHERE square_checkout_id = %s
+        ''', (checkout_id,))
+        payment = cur.fetchone()
+        
+        cur.close()
+        conn.close()
+        
+        if not payment:
+            return create_response("error", "Payment not found", status_code=404)
+        
+        return create_response(
+            "success",
+            "Payment status retrieved",
+            data={
+                "status": payment['status'],
+                "email": payment['email'],
+                "amount": float(payment['amount']),
+                "totalCredits": payment['total_credits'],
+                "completed": payment['status'] == 'completed'
+            }
+        )
+    except Exception as e:
+        logger.error(f"Verify payment error: {e}", exc_info=True)
+        return create_response("error", "Failed to verify payment", status_code=500)
+
+
+# =============================================================================
 # ROUTES: DEBUG
 # =============================================================================
-@app.route('/api/debug/email-config', methods=['GET'])
+@app.route('/api/debug/email-config', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def debug_email_config():
+    if request.method == 'OPTIONS':
+        return '', 204
     resend_key = os.environ.get('RESEND_API_KEY')
     return create_response(
         "success", "Email configuration status",
@@ -935,9 +1253,11 @@ def debug_email_config():
     )
 
 
-@app.route('/api/debug/routes', methods=['GET'])
+@app.route('/api/debug/routes', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def debug_routes():
+    if request.method == 'OPTIONS':
+        return '', 204
     routes_info = []
     for rule in app.url_map.iter_rules():
         methods = list(rule.methods - {'HEAD', 'OPTIONS'})
@@ -950,9 +1270,11 @@ def debug_routes():
     )
 
 
-@app.route('/api/debug/database', methods=['GET'])
+@app.route('/api/debug/database', methods=['GET', 'OPTIONS'])
 @cross_origin()
 def debug_database():
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -973,6 +1295,24 @@ def debug_database():
     except Exception as e:
         logger.error(f"Database debug error: {e}")
         return create_response("error", "Database connection failed", errors=[str(e)], status_code=500)
+
+
+@app.route('/api/debug/square', methods=['GET', 'OPTIONS'])
+@cross_origin()
+def debug_square():
+    """Debug Square configuration"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    return create_response(
+        "success", "Square configuration status",
+        data={
+            "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID),
+            "square_environment": SQUARE_ENVIRONMENT,
+            "location_id_set": bool(SQUARE_LOCATION_ID),
+            "access_token_set": bool(SQUARE_ACCESS_TOKEN),
+            "api_url": SQUARE_API_URL
+        }
+    )
 
 
 # =============================================================================
@@ -1003,5 +1343,7 @@ if __name__ == '__main__':
     logger.info(f"Port: {port}")
     logger.info(f"Frontend URL: {FRONTEND_URL}")
     logger.info(f"Email configured: {bool(os.environ.get('RESEND_API_KEY'))}")
+    logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
+    logger.info(f"Square environment: {SQUARE_ENVIRONMENT}")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
