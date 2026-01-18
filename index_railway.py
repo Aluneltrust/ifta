@@ -1194,20 +1194,22 @@ def payment_webhook():
         
         event_type = data.get('type')
         
-        if event_type == 'payment.completed':
+        if event_type == 'payment.updated':
             payment_data = data.get('data', {}).get('object', {}).get('payment', {})
-            checkout_id = payment_data.get('reference_id')
-            square_payment_id = payment_data.get('id')
+            payment_status = payment_data.get('status')
             
-            if checkout_id:
-                complete_payment(checkout_id, square_payment_id)
-                logger.info(f"Payment webhook processed: {checkout_id}")
+            if payment_status == 'COMPLETED':
+                checkout_id = payment_data.get('reference_id')
+                square_payment_id = payment_data.get('id')
+                
+                if checkout_id:
+                    complete_payment(checkout_id, square_payment_id)
+                    logger.info(f"Payment webhook processed: {checkout_id}")
         
         return create_response("success", "Webhook received")
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return create_response("error", "Webhook processing failed", status_code=500)
-
 
 @app.route('/api/payment/verify', methods=['POST', 'OPTIONS'])
 @cross_origin()
