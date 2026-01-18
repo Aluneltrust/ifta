@@ -1198,18 +1198,41 @@ def payment_webhook():
             payment_data = data.get('data', {}).get('object', {}).get('payment', {})
             payment_status = payment_data.get('status')
             
+            logger.info(f"Payment status: {payment_status}")
+            
             if payment_status == 'COMPLETED':
-                checkout_id = payment_data.get('reference_id')
                 square_payment_id = payment_data.get('id')
+                amount_cents = payment_data.get('amount_money', {}).get('amount', 0)
+                amount_dollars = amount_cents / 100
                 
-                if checkout_id:
-                    complete_payment(checkout_id, square_payment_id)
-                    logger.info(f"Payment webhook processed: {checkout_id}")
+                logger.info(f"Payment completed: amount=${amount_dollars}, square_id={square_payment_id}")
+                
+                # Find most recent pending payment with matching amount
+                conn = get_db_connection()
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                
+                cur.execute('''
+                    SELECT * FROM payments 
+                    WHERE amount = %s AND status = 'pending'
+                    ORDER BY created_at DESC LIMIT 1
+                ''', (amount_dollars,))
+                payment = cur.fetchone()
+                
+                cur.close()
+                conn.close()
+                
+                if payment:
+                    complete_payment(payment['square_checkout_id'], square_payment_id)
+                    logger.info(f"Payment webhook processed for {payment['email']}")
+                else:
+                    logger.warning(f"No pending payment found for amount ${amount_dollars}")
         
         return create_response("success", "Webhook received")
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return create_response("error", "Webhook processing failed", status_code=500)
+    
+    
 
 @app.route('/api/payment/verify', methods=['POST', 'OPTIONS'])
 @cross_origin()
