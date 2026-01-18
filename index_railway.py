@@ -1116,20 +1116,18 @@ def create_checkout_link():
             checkout_payload = {
                 "idempotency_key": checkout_id,
                 "order": {
-                    "order": {
-                        "location_id": SQUARE_LOCATION_ID,
-                        "line_items": [
-                            {
-                                "name": f"{total_credits} IFTA Credits",
-                                "quantity": "1",
-                                "base_price_money": {
-                                    "amount": amount_cents,
-                                    "currency": "USD"
-                                },
-                                "note": f"Credits: {credits}, Bonus: {bonus_credits}"
-                            }
-                        ]
-                    }
+                    "location_id": SQUARE_LOCATION_ID,
+                    "line_items": [
+                        {
+                            "name": f"{total_credits} IFTA Credits",
+                            "quantity": "1",
+                            "base_price_money": {
+                                "amount": amount_cents,
+                                "currency": "USD"
+                            },
+                            "note": f"Credits: {credits}, Bonus: {bonus_credits}"
+                        }
+                    ]
                 },
                 "checkout_options": {
                     "redirect_url": f"{FRONTEND_URL}/#/payment-success?checkout_id={checkout_id}",
