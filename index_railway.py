@@ -90,7 +90,7 @@ def get_db_connection():
 
 
 def init_database():
-    """Initialize database tables"""
+    """Initialize database tables and add missing columns"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -141,10 +141,20 @@ def init_database():
             )
         ''')
         
-        # Add is_first_purchase column if it doesn't exist
+        # Add missing columns to payments table if they don't exist
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS bonus_credits INTEGER DEFAULT 0')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS total_credits INTEGER')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS is_first_purchase BOOLEAN DEFAULT FALSE')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT \'pending\'')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP')
+        cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id INTEGER')
+        
+        # Update any null total_credits to match credits + bonus
         cur.execute('''
-            ALTER TABLE payments 
-            ADD COLUMN IF NOT EXISTS is_first_purchase BOOLEAN DEFAULT FALSE
+            UPDATE payments 
+            SET total_credits = credits + COALESCE(bonus_credits, 0) 
+            WHERE total_credits IS NULL
         ''')
         
         conn.commit()
