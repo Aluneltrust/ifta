@@ -149,6 +149,8 @@ def init_database():
         cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP')
         cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP')
         cur.execute('ALTER TABLE payments ADD COLUMN IF NOT EXISTS user_id INTEGER')
+        cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS bsv_txid VARCHAR(255)")
+        cur.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_type VARCHAR(20) DEFAULT 'square'")
         
         # Update any null total_credits to match credits + bonus
         cur.execute('''
@@ -614,6 +616,117 @@ def complete_payment(checkout_id, square_payment_id=None):
     except Exception as e:
         logger.error(f"Error completing payment: {e}")
         return False
+
+
+
+# =============================================================================
+# ROUTES: BSV PAYMENTS
+# =============================================================================
+# Add this section to your index_railway.py after the existing payment routes
+
+@app.route('/api/credits/bsv-payment', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def bsv_payment():
+    """Process BSV payment and add credits"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    try:
+        # Verify authentication
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        
+        token_email = verify_token(token)
+        if not token_email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
+        email = data.get('email', '').strip().lower()
+        txid = data.get('txid', '')
+        amount = data.get('amount', 0)
+        satoshis = data.get('satoshis', 0)
+        credits = data.get('credits', 0)
+        bonus_credits = data.get('bonusCredits', 0)
+        total_credits = data.get('totalCredits', 0)
+        is_first_purchase = data.get('isFirstPurchase', False)
+        
+        # Validate
+        if not txid:
+            return create_response("error", "Transaction ID required", status_code=400)
+        
+        if not validate_email(email):
+            return create_response("error", "Invalid email", status_code=400)
+        
+        # Verify email matches token
+        if email != token_email:
+            return create_response("error", "Email mismatch", status_code=403)
+        
+        if total_credits <= 0:
+            return create_response("error", "Invalid credits amount", status_code=400)
+        
+        # Check for duplicate transaction
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM payments WHERE bsv_txid = %s', (txid,))
+        existing = cur.fetchone()
+        
+        if existing:
+            cur.close()
+            conn.close()
+            return create_response("error", "Transaction already processed", status_code=409)
+        
+        # Verify first purchase eligibility if claimed
+        if is_first_purchase:
+            if not check_first_purchase_available(email):
+                cur.close()
+                conn.close()
+                return create_response(
+                    "error", 
+                    "First purchase bonus has already been used",
+                    status_code=400
+                )
+        
+        # Create payment record
+        cur.execute('''
+            INSERT INTO payments (email, amount, credits, bonus_credits, total_credits, is_first_purchase, bsv_txid, payment_type, status, created_at, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'bsv', 'completed', %s, %s)
+            RETURNING id
+        ''', (email, amount, credits, bonus_credits, total_credits, is_first_purchase, txid, datetime.now(), datetime.now()))
+        
+        payment_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        # Add credits to user
+        new_balance = add_user_credits(email, total_credits)
+        
+        # Mark first purchase as used if applicable
+        if is_first_purchase:
+            mark_first_purchase_used(email)
+        
+        logger.info(f"BSV payment processed: {payment_id}, txid={txid}, added {total_credits} credits to {email}")
+        
+        return create_response(
+            "success", 
+            "BSV payment processed successfully",
+            data={
+                "payment_id": payment_id,
+                "txid": txid,
+                "credits_added": total_credits,
+                "new_balance": new_balance,
+                "is_first_purchase": is_first_purchase
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"BSV payment error: {e}", exc_info=True)
+        return create_response("error", "Failed to process BSV payment", status_code=500)
+
 
 
 # =============================================================================
