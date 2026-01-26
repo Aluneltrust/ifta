@@ -20,6 +20,10 @@ import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS, cross_origin
 
+from functools import wraps
+from collections import defaultdict
+import time
+
 
 # =============================================================================
 # APP CONFIGURATION
@@ -169,6 +173,30 @@ def init_database():
 
 
 init_database()
+
+
+
+# Simple in-memory rate limiter
+request_counts = defaultdict(list)
+
+def rate_limit(max_requests=5, window_seconds=300):
+    """Allow max_requests per window_seconds per IP"""
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            ip = request.remote_addr
+            now = time.time()
+            
+            # Clean old requests
+            request_counts[ip] = [t for t in request_counts[ip] if now - t < window_seconds]
+            
+            if len(request_counts[ip]) >= max_requests:
+                return create_response("error", "Too many requests. Try again later.", status_code=429)
+            
+            request_counts[ip].append(now)
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
 
 
 # =============================================================================
@@ -954,6 +982,7 @@ def verify():
 # =============================================================================
 @app.route('/api/auth/forgot-password', methods=['POST', 'OPTIONS'])
 @cross_origin()
+@rate_limit(max_requests=5, window_seconds=300) 
 def forgot_password():
     if request.method == 'OPTIONS':
         return '', 204
@@ -979,10 +1008,8 @@ def forgot_password():
         
         save_reset_token(email, token_hash, expires_at)
         
-        if FRONTEND_URL.startswith('http'):
-            reset_url = f"{FRONTEND_URL}/#/reset-password?token={token}"
-        else:
-            reset_url = f"iftacounter://reset-password?token={token}"
+        # Always use web URL - redirects to app via /reset-password page
+        reset_url = f"https://ifta-production.up.railway.app/reset-password?token={token}"
         
         html_content = get_password_reset_email_html(reset_url, expires_at)
         
@@ -996,7 +1023,7 @@ def forgot_password():
     except Exception as e:
         logger.error(f"Forgot password error: {e}", exc_info=True)
         return create_response("error", "Internal server error", status_code=500)
-
+    
 
 @app.route('/api/auth/reset-password', methods=['POST', 'OPTIONS'])
 @cross_origin()
@@ -1032,6 +1059,31 @@ def reset_password():
     except Exception as e:
         logger.error(f"Reset password error: {e}", exc_info=True)
         return create_response("error", "Internal server error", status_code=500)
+
+
+
+@app.route('/reset-password', methods=['GET'])
+def reset_password_redirect():
+    """Redirect web link to Electron app"""
+    token = request.args.get('token', '')
+    return f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Reset Password - IFTA Counter</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+            .btn {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; margin: 20px 0; }}
+        </style>
+    </head>
+    <body>
+        <h1>Reset Your Password</h1>
+        <p>Click the button below to open IFTA Counter and reset your password:</p>
+        <a href="iftacounter://reset-password?token={token}" class="btn">Open IFTA Counter</a>
+        <p style="color: #666; margin-top: 30px;">If the app doesn't open, make sure IFTA Counter is installed.</p>
+    </body>
+    </html>
+    '''
 
 
 # =============================================================================
