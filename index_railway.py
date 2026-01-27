@@ -776,7 +776,7 @@ def send_email(to_email, subject, html_content):
                 'Content-Type': 'application/json'
             },
             json={
-                'from': 'IFTA Counter <noreply@carriermiles.com>',
+                'from': 'MilesOn <noreply@carriermiles.com>',
                 'to': [to_email],
                 'subject': subject,
                 'html': html_content
@@ -799,7 +799,7 @@ def get_password_reset_email_html(reset_url, expires_at):
     return f"""
     <!DOCTYPE html>
     <html>
-    <head><title>Password Reset - IFTA Counter</title></head>
+    <head><title>Password Reset - MilesOn</title></head>
     <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
             <h1>Password Reset Request</h1>
@@ -1013,7 +1013,7 @@ def forgot_password():
         
         html_content = get_password_reset_email_html(reset_url, expires_at)
         
-        if send_email(email, "Password Reset - IFTA Counter", html_content):
+        if send_email(email, "Password Reset - MilesOn", html_content):
             return create_response("success", "Reset instructions have been sent to your email")
         else:
             return create_response(
@@ -1070,7 +1070,7 @@ def reset_password_redirect():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Reset Password - IFTA Counter</title>
+        <title>Reset Password - MilesOn</title>
         <style>
             body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
             .btn {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; margin: 20px 0; }}
@@ -1078,9 +1078,9 @@ def reset_password_redirect():
     </head>
     <body>
         <h1>Reset Your Password</h1>
-        <p>Click the button below to open IFTA Counter and reset your password:</p>
-        <a href="iftacounter://reset-password?token={token}" class="btn">Open IFTA Counter</a>
-        <p style="color: #666; margin-top: 30px;">If the app doesn't open, make sure IFTA Counter is installed.</p>
+        <p>Click the button below to open MilesOn and reset your password:</p>
+        <a href="mileson://reset-password?token={token}" class="btn">Open MilesOn</a>
+        <p style="color: #666; margin-top: 30px;">If the app doesn't open, make sure MilesOn is installed.</p>
     </body>
     </html>
     '''
@@ -1294,9 +1294,9 @@ def create_checkout_link():
             
             # Description for the checkout
             if is_first_purchase and bonus_credits > 0:
-                item_name = f"🎉 {credits} + {bonus_credits} Bonus = {total_credits} IFTA Credits"
+                item_name = f"🎉 {credits} + {bonus_credits} Bonus = {total_credits} MilesOn Credits"
             else:
-                item_name = f"{total_credits} IFTA Credits"
+                item_name = f"{total_credits} MilesOn Credits"
             
             checkout_payload = {
                 "idempotency_key": checkout_id,
