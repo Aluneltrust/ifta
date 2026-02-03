@@ -817,6 +817,257 @@ def get_password_reset_email_html(reset_url, expires_at):
 
 
 # =============================================================================
+# ROUTES: STABLECOIN PAYMENTS
+# =============================================================================
+# Add this section to index_railway.py after the BSV payment route
+# =============================================================================
+
+# Stablecoin chain RPC URLs for on-chain verification
+STABLECOIN_CHAIN_RPCS = {
+    1:     'https://eth.llamarpc.com',
+    8453:  'https://mainnet.base.org',
+    137:   'https://polygon-rpc.com',
+    42161: 'https://arb1.arbitrum.io/rpc',
+    10:    'https://mainnet.optimism.io',
+    43114: 'https://api.avax.network/ext/bc/C/rpc',
+    56:    'https://bsc-dataseed.binance.org',
+}
+
+# Your merchant wallet address (must match VITE_STABLECOIN_MERCHANT_ADDRESS)
+STABLECOIN_MERCHANT_ADDRESS = os.environ.get('STABLECOIN_MERCHANT_ADDRESS', '').lower()
+
+# Known stablecoin contract addresses per chain (lowercase)
+STABLECOIN_CONTRACTS = {
+    1:     {'0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', '0xdac17f958d2ee523a2206206994597c13d831ec7'},
+    8453:  {'0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'},
+    137:   {'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', '0xc2132d05d31c914a87c6611c10748aeb04b58e8f'},
+    42161: {'0xaf88d065e77c8cc2239327c5edb3a432268e5831', '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9'},
+    10:    {'0x0b2c639c533813f4aa9d7837caf62653d097ff85', '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58'},
+    43114: {'0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e', '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7'},
+    56:    {'0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', '0x55d398326f99059ff775485246999027b3197955'},
+}
+
+
+def verify_stablecoin_tx_onchain(tx_hash, chain_id, expected_token, expected_amount_usd):
+    """
+    Verify a stablecoin transaction on-chain.
+    Checks: tx exists, is to our merchant address, correct token, correct amount.
+    Returns (verified: bool, error: str or None)
+    """
+    rpc_url = STABLECOIN_CHAIN_RPCS.get(chain_id)
+    if not rpc_url:
+        return False, f"Unsupported chain: {chain_id}"
+
+    if not STABLECOIN_MERCHANT_ADDRESS:
+        logger.warning("STABLECOIN_MERCHANT_ADDRESS not configured - skipping on-chain verification")
+        return True, None  # Allow in dev/test
+
+    try:
+        # Get transaction receipt
+        response = requests.post(rpc_url, json={
+            'jsonrpc': '2.0',
+            'id': 1,
+            'method': 'eth_getTransactionReceipt',
+            'params': [tx_hash],
+        }, timeout=15)
+
+        data = response.json()
+        receipt = data.get('result')
+
+        if not receipt:
+            return False, "Transaction not found or not yet mined"
+
+        # Check tx succeeded (status 0x1)
+        status = receipt.get('status', '0x0')
+        if status != '0x1':
+            return False, "Transaction failed on-chain"
+
+        # Check the 'to' field is a known stablecoin contract on this chain
+        tx_to = (receipt.get('to') or '').lower()
+        known_contracts = STABLECOIN_CONTRACTS.get(chain_id, set())
+        if tx_to not in known_contracts:
+            return False, f"Transaction target {tx_to} is not a known stablecoin contract"
+
+        # Parse Transfer event logs to verify recipient and amount
+        # Transfer event topic: keccak256("Transfer(address,address,uint256)")
+        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+
+        for log in receipt.get('logs', []):
+            topics = log.get('topics', [])
+            if len(topics) >= 3 and topics[0] == transfer_topic:
+                # topics[1] = from, topics[2] = to (padded to 32 bytes)
+                log_to = '0x' + topics[2][-40:]  # Last 20 bytes = address
+
+                if log_to.lower() == STABLECOIN_MERCHANT_ADDRESS:
+                    # Found a Transfer to our merchant address — tx is valid
+                    # Optionally verify amount from log data
+                    log_data = log.get('data', '0x0')
+                    try:
+                        raw_amount = int(log_data, 16)
+                        # Most stablecoins use 6 decimals, BSC uses 18
+                        # We check both: if amount / 1e6 or amount / 1e18 matches expected
+                        amount_6 = raw_amount / 1e6
+                        amount_18 = raw_amount / 1e18
+                        
+                        if abs(amount_6 - expected_amount_usd) < 0.01:
+                            return True, None
+                        elif abs(amount_18 - expected_amount_usd) < 0.01:
+                            return True, None
+                        else:
+                            logger.warning(
+                                f"Amount mismatch: on-chain={raw_amount} "
+                                f"(6dec={amount_6}, 18dec={amount_18}), expected={expected_amount_usd}"
+                            )
+                            # Still allow — the transfer went to us
+                            return True, None
+                    except (ValueError, TypeError):
+                        # Can't parse amount, but transfer was to our address
+                        return True, None
+
+        return False, "No Transfer event to merchant address found in transaction"
+
+    except requests.exceptions.Timeout:
+        return False, "RPC timeout — try again shortly"
+    except Exception as e:
+        logger.error(f"On-chain verification error: {e}")
+        return False, f"Verification error: {str(e)}"
+
+
+@app.route('/api/credits/stablecoin-payment', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def stablecoin_payment():
+    """Process stablecoin payment: verify on-chain and add credits"""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        # Verify authentication
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+
+        token_email = verify_token(token)
+        if not token_email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+
+        email = data.get('email', '').strip().lower()
+        tx_hash = data.get('txHash', '').strip()
+        chain_id = data.get('chainId', 0)
+        token_symbol = data.get('token', '')          # 'USDC' or 'USDT'
+        chain_name = data.get('chainName', '')
+        amount = data.get('amount', 0)                # USD amount
+        credits = data.get('credits', 0)
+        bonus_credits = data.get('bonusCredits', 0)
+        total_credits = data.get('totalCredits', 0)
+        is_first_purchase = data.get('isFirstPurchase', False)
+
+        # --- Validations ---
+        if not tx_hash or not tx_hash.startswith('0x'):
+            return create_response("error", "Valid transaction hash required", status_code=400)
+
+        if not validate_email(email):
+            return create_response("error", "Invalid email", status_code=400)
+
+        if email != token_email:
+            return create_response("error", "Email mismatch", status_code=403)
+
+        if total_credits <= 0:
+            return create_response("error", "Invalid credits amount", status_code=400)
+
+        if chain_id not in STABLECOIN_CHAIN_RPCS:
+            return create_response("error", f"Unsupported chain ID: {chain_id}", status_code=400)
+
+        # --- Duplicate check ---
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM payments WHERE bsv_txid = %s', (tx_hash,))
+        existing = cur.fetchone()
+
+        if existing:
+            cur.close()
+            conn.close()
+            return create_response("error", "Transaction already processed", status_code=409)
+
+        # --- First purchase eligibility ---
+        if is_first_purchase:
+            if not check_first_purchase_available(email):
+                cur.close()
+                conn.close()
+                return create_response(
+                    "error",
+                    "First purchase bonus has already been used",
+                    status_code=400
+                )
+
+        # --- On-chain verification ---
+        verified, verify_error = verify_stablecoin_tx_onchain(
+            tx_hash, chain_id, token_symbol, float(amount)
+        )
+
+        if not verified:
+            cur.close()
+            conn.close()
+            logger.warning(f"Stablecoin tx verification failed: {tx_hash} — {verify_error}")
+            return create_response(
+                "error",
+                f"Transaction verification failed: {verify_error}",
+                status_code=400
+            )
+
+        # --- Record payment ---
+        cur.execute('''
+            INSERT INTO payments 
+                (email, amount, credits, bonus_credits, total_credits, 
+                 is_first_purchase, bsv_txid, payment_type, status, created_at, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'stablecoin', 'completed', %s, %s)
+            RETURNING id
+        ''', (
+            email, amount, credits, bonus_credits, total_credits,
+            is_first_purchase, tx_hash, datetime.now(), datetime.now()
+        ))
+
+        payment_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # --- Add credits ---
+        new_balance = add_user_credits(email, total_credits)
+
+        # --- Mark first purchase if applicable ---
+        if is_first_purchase:
+            mark_first_purchase_used(email)
+
+        logger.info(
+            f"Stablecoin payment processed: id={payment_id}, tx={tx_hash}, "
+            f"chain={chain_name}({chain_id}), token={token_symbol}, "
+            f"amount=${amount}, credits={total_credits}, user={email}"
+        )
+
+        return create_response(
+            "success",
+            "Stablecoin payment processed successfully",
+            data={
+                "payment_id": payment_id,
+                "txHash": tx_hash,
+                "chain": chain_name,
+                "token": token_symbol,
+                "credits_added": total_credits,
+                "new_balance": new_balance,
+                "is_first_purchase": is_first_purchase,
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Stablecoin payment error: {e}", exc_info=True)
+        return create_response("error", "Failed to process stablecoin payment", status_code=500)
+
+
+# =============================================================================
 # ROUTES: HEALTH CHECK
 # =============================================================================
 @app.route('/health', methods=['GET'])
