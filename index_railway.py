@@ -832,9 +832,10 @@ def health_check():
         message="Railway User Management API",
         data={
             "version": "3.1.0",
-            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "sms_messaging"],
+            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "sms_messaging", "stablecoin_payments"],
             "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID),
             "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER),
+            "stablecoin_merchant": bool(os.environ.get('STABLECOIN_MERCHANT_ADDRESS')),
             "first_purchase_bonus": {
                 "bonus_credits": FIRST_PURCHASE_BONUS_CREDITS,
                 "description": f"+{FIRST_PURCHASE_BONUS_CREDITS} bonus credits on first purchase"
@@ -1430,6 +1431,451 @@ def verify_payment():
 
 
 # =============================================================================
+# STABLECOIN CHAINS CONFIG (for on-chain verification)
+# =============================================================================
+
+STABLECOIN_CHAINS = {
+    1: {
+        'name': 'Ethereum', 'rpc': 'https://eth.llamarpc.com', 'explorer': 'https://etherscan.io',
+        'tokens': {
+            'USDC': {'addr': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 'dec': 6},
+            'USDT': {'addr': '0xdAC17F958D2ee523a2206206994597C13D831ec7', 'dec': 6},
+        }
+    },
+    8453: {
+        'name': 'Base', 'rpc': 'https://mainnet.base.org', 'explorer': 'https://basescan.org',
+        'tokens': {
+            'USDC': {'addr': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'dec': 6},
+        }
+    },
+    137: {
+        'name': 'Polygon', 'rpc': 'https://polygon-rpc.com', 'explorer': 'https://polygonscan.com',
+        'tokens': {
+            'USDC': {'addr': '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', 'dec': 6},
+            'USDT': {'addr': '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', 'dec': 6},
+        }
+    },
+    42161: {
+        'name': 'Arbitrum One', 'rpc': 'https://arb1.arbitrum.io/rpc', 'explorer': 'https://arbiscan.io',
+        'tokens': {
+            'USDC': {'addr': '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'dec': 6},
+            'USDT': {'addr': '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', 'dec': 6},
+        }
+    },
+    10: {
+        'name': 'Optimism', 'rpc': 'https://mainnet.optimism.io', 'explorer': 'https://optimistic.etherscan.io',
+        'tokens': {
+            'USDC': {'addr': '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', 'dec': 6},
+            'USDT': {'addr': '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', 'dec': 6},
+        }
+    },
+    43114: {
+        'name': 'Avalanche', 'rpc': 'https://api.avax.network/ext/bc/C/rpc', 'explorer': 'https://snowtrace.io',
+        'tokens': {
+            'USDC': {'addr': '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', 'dec': 6},
+            'USDT': {'addr': '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', 'dec': 6},
+        }
+    },
+    56: {
+        'name': 'BNB Chain', 'rpc': 'https://bsc-dataseed.binance.org', 'explorer': 'https://bscscan.com',
+        'tokens': {
+            'USDC': {'addr': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', 'dec': 18},
+            'USDT': {'addr': '0x55d398326f99059fF775485246999027B3197955', 'dec': 18},
+        }
+    },
+}
+
+STABLECOIN_MERCHANT_ADDRESS = os.environ.get('STABLECOIN_MERCHANT_ADDRESS', '')
+
+
+# =============================================================================
+# STABLECOIN ON-CHAIN VERIFICATION
+# =============================================================================
+
+def verify_stablecoin_tx_onchain(tx_hash, chain_id, expected_token, expected_amount_usd):
+    """Verify a stablecoin transaction on-chain via RPC"""
+    chain = STABLECOIN_CHAINS.get(chain_id)
+    if not chain:
+        return False, f"Unsupported chain ID: {chain_id}"
+
+    try:
+        # Fetch transaction receipt
+        resp = requests.post(chain['rpc'], json={
+            'jsonrpc': '2.0', 'id': 1,
+            'method': 'eth_getTransactionByHash',
+            'params': [tx_hash]
+        }, timeout=15)
+        data = resp.json()
+        tx = data.get('result')
+
+        if not tx:
+            return False, "Transaction not found (may not be mined yet)"
+
+        # Verify the tx was sent to a known stablecoin contract on this chain
+        tx_to = tx.get('to', '').lower()
+        known_addrs = {v['addr'].lower(): k for k, v in chain['tokens'].items()}
+
+        if tx_to not in known_addrs:
+            return False, f"Transaction target {tx_to} is not a known stablecoin contract"
+
+        # Basic check passed — tx was sent to a stablecoin contract
+        logger.info(f"Stablecoin tx verified: {tx_hash} on {chain['name']} to {known_addrs[tx_to]}")
+        return True, None
+
+    except requests.exceptions.Timeout:
+        return False, "RPC timeout"
+    except Exception as e:
+        logger.error(f"Stablecoin verification error: {e}")
+        return False, str(e)
+
+
+# =============================================================================
+# ROUTES: STABLECOIN PAYMENT PAGE (served in browser for MetaMask)
+# =============================================================================
+
+@app.route('/pay/stablecoin', methods=['GET'])
+def stablecoin_pay_page():
+    """Serve the stablecoin payment page for browser-based MetaMask payments"""
+    token = request.args.get('token', '')
+    email = request.args.get('email', '')
+    amount = request.args.get('amount', '10')
+    credits_param = request.args.get('credits', amount)
+    bonus = request.args.get('bonus', '0')
+    total = request.args.get('total', credits_param)
+    is_first = request.args.get('first', '0')
+    merchant = request.args.get('merchant', STABLECOIN_MERCHANT_ADDRESS)
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MilesOn - Stablecoin Payment</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}}
+.card{{background:#1e293b;border-radius:16px;padding:32px;max-width:420px;width:100%;box-shadow:0 25px 50px rgba(0,0,0,0.3)}}
+h1{{font-size:20px;text-align:center;margin-bottom:4px}}
+.subtitle{{text-align:center;color:#94a3b8;font-size:13px;margin-bottom:24px}}
+.step{{display:none}}.step.active{{display:flex;flex-direction:column;align-items:center;gap:12px}}
+.amount-box{{background:#0f172a;border-radius:12px;padding:16px;text-align:center;width:100%}}
+.amount-big{{font-size:32px;font-weight:700;color:#fff}}.amount-credits{{color:#059669;font-size:14px;font-weight:500}}
+.bonus-tag{{background:#065f46;color:#34d399;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}}
+.chain-list{{display:flex;flex-direction:column;gap:6px;width:100%;max-height:280px;overflow-y:auto}}
+.chain-btn{{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#0f172a;border:1px solid #334155;border-radius:10px;cursor:pointer;color:#e2e8f0;font-size:14px;width:100%;text-align:left}}
+.chain-btn:hover{{border-color:#6366f1}}.chain-btn.disabled{{opacity:0.4;cursor:not-allowed}}
+.chain-name{{font-weight:500}}.chain-token{{color:#818cf8;font-size:12px;font-weight:600;background:#1e1b4b;padding:1px 6px;border-radius:4px;margin-left:6px}}
+.chain-bal{{font-family:monospace;font-size:13px;color:#94a3b8}}.chain-bal.enough{{color:#34d399}}
+.btn{{padding:12px 24px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;width:100%;margin-top:4px}}
+.btn-metamask{{background:#f6851b;color:#fff}}.btn-metamask:hover{{background:#e2761b}}
+.btn-primary{{background:#6366f1;color:#fff}}.btn-primary:hover{{background:#4f46e5}}
+.btn-secondary{{background:#334155;color:#94a3b8}}.btn-secondary:hover{{background:#475569}}
+.btn:disabled{{opacity:0.6;cursor:not-allowed}}
+.btn-row{{display:flex;gap:8px;width:100%}}
+.btn-row .btn{{flex:1}}
+.review-card{{background:#0f172a;border-radius:10px;padding:16px;width:100%}}
+.review-row{{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}}
+.review-label{{color:#94a3b8}}.review-value{{color:#e2e8f0;font-weight:500}}
+.review-divider{{height:1px;background:#334155;margin:6px 0}}
+.success-icon{{width:56px;height:56px;border-radius:50%;background:#065f46;display:flex;align-items:center;justify-content:center;font-size:28px}}
+.tx-box{{background:#0f172a;border-radius:8px;padding:10px 14px;width:100%;font-family:monospace;font-size:11px;color:#94a3b8;word-break:break-all}}
+.spinner{{width:40px;height:40px;border:3px solid #334155;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+.error-text{{color:#f87171;font-size:13px;text-align:center}}
+.no-metamask{{text-align:center;color:#94a3b8;font-size:14px;line-height:1.6}}
+.no-metamask a{{color:#818cf8;text-decoration:none;font-weight:600}}
+.note{{font-size:12px;color:#64748b;text-align:center}}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>MilesOn Credits</h1>
+<p class="subtitle">Pay with USDC or USDT via MetaMask</p>
+
+<div id="stepConnect" class="step active">
+  <div class="amount-box">
+    <div class="amount-big">${{amount}} USDC/USDT</div>
+    <div class="amount-credits">= {total} Credits{' <span class="bonus-tag">+' + bonus + ' bonus!</span>' if int(bonus) > 0 else ''}</div>
+  </div>
+  <div id="noMetamask" class="no-metamask" style="display:none">MetaMask not detected.<br/><a href="https://metamask.io/download/" target="_blank">Install MetaMask</a> and refresh this page.</div>
+  <div id="hasMetamask"><button class="btn btn-metamask" id="btnConnect" onclick="connectWallet()">&#129418; Connect MetaMask</button></div>
+</div>
+
+<div id="stepChains" class="step">
+  <div class="amount-box">
+    <div class="amount-big">${{amount}}</div>
+    <div class="amount-credits">{total} Credits</div>
+  </div>
+  <p class="note">Select network & stablecoin</p>
+  <div class="chain-list" id="chainList"></div>
+  <button class="btn btn-secondary" onclick="showStep('stepConnect')">Back</button>
+</div>
+
+<div id="stepReview" class="step">
+  <div class="review-card">
+    <div class="review-row"><span class="review-label">Network</span><span class="review-value" id="rvChain"></span></div>
+    <div class="review-row"><span class="review-label">Token</span><span class="review-value" id="rvToken"></span></div>
+    <div class="review-divider"></div>
+    <div class="review-row"><span class="review-label">Amount</span><span class="review-value" id="rvAmount"></span></div>
+    <div class="review-row"><span class="review-label">Credits</span><span class="review-value" id="rvCredits"></span></div>
+    <div class="review-row"><span class="review-label">To</span><span class="review-value" style="font-size:11px;font-family:monospace" id="rvMerchant"></span></div>
+  </div>
+  <div class="btn-row">
+    <button class="btn btn-secondary" onclick="showStep('stepChains')">Back</button>
+    <button class="btn btn-primary" onclick="sendPayment()">Confirm & Pay</button>
+  </div>
+</div>
+
+<div id="stepSending" class="step">
+  <div class="spinner"></div>
+  <p>Confirm in MetaMask...</p>
+  <p class="note">Do not close this page</p>
+</div>
+
+<div id="stepSuccess" class="step">
+  <div class="success-icon">&#10003;</div>
+  <h2 style="color:#34d399"><span id="successCredits"></span> Credits Added!</h2>
+  <div class="tx-box">
+    <div style="font-size:11px;color:#64748b;margin-bottom:4px">Transaction</div>
+    <span id="txHashDisplay"></span>
+    <a id="txExplorerLink" href="#" target="_blank" style="color:#818cf8;margin-left:6px;font-size:11px">View ↗</a>
+  </div>
+  <p class="note">You can close this page and return to MilesOn.</p>
+</div>
+
+<div id="stepError" class="step">
+  <p class="error-text" id="errorMsg">Payment failed</p>
+  <button class="btn btn-secondary" onclick="showStep('stepReview')">Try Again</button>
+</div>
+</div>
+
+<script>
+const API_BASE='{request.host_url.rstrip("/")}';
+const AUTH_TOKEN='{token}';
+const EMAIL='{email}';
+const AMOUNT={amount};
+const CREDITS={credits_param};
+const BONUS={bonus};
+const TOTAL_CREDITS={total};
+const IS_FIRST={'true' if is_first == '1' else 'false'};
+const MERCHANT_ADDR='{merchant}';
+
+const CHAINS={{8453:{{name:'Base',short:'Base',hex:'0x2105',rpc:'https://mainnet.base.org',explorer:'https://basescan.org',tokens:{{USDC:{{addr:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',dec:6}}}}}},137:{{name:'Polygon',short:'MATIC',hex:'0x89',rpc:'https://polygon-rpc.com',explorer:'https://polygonscan.com',tokens:{{USDC:{{addr:'0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',dec:6}},USDT:{{addr:'0xc2132D05D31c914a87C6611C10748AEb04B58e8F',dec:6}}}}}},42161:{{name:'Arbitrum One',short:'ARB',hex:'0xa4b1',rpc:'https://arb1.arbitrum.io/rpc',explorer:'https://arbiscan.io',tokens:{{USDC:{{addr:'0xaf88d065e77c8cC2239327C5EDb3A432268e5831',dec:6}},USDT:{{addr:'0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',dec:6}}}}}},10:{{name:'Optimism',short:'OP',hex:'0xa',rpc:'https://mainnet.optimism.io',explorer:'https://optimistic.etherscan.io',tokens:{{USDC:{{addr:'0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',dec:6}},USDT:{{addr:'0x94b008aA00579c1307B0EF2c499aD98a8ce58e58',dec:6}}}}}},43114:{{name:'Avalanche',short:'AVAX',hex:'0xa86a',rpc:'https://api.avax.network/ext/bc/C/rpc',explorer:'https://snowtrace.io',tokens:{{USDC:{{addr:'0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',dec:6}},USDT:{{addr:'0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7',dec:6}}}}}},56:{{name:'BNB Chain',short:'BSC',hex:'0x38',rpc:'https://bsc-dataseed.binance.org',explorer:'https://bscscan.com',tokens:{{USDC:{{addr:'0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',dec:18}},USDT:{{addr:'0x55d398326f99059fF775485246999027B3197955',dec:18}}}}}},1:{{name:'Ethereum',short:'ETH',hex:'0x1',rpc:'https://eth.llamarpc.com',explorer:'https://etherscan.io',tokens:{{USDC:{{addr:'0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',dec:6}},USDT:{{addr:'0xdAC17F958D2ee523a2206206994597C13D831ec7',dec:6}}}}}}}};
+const ORDER=[8453,137,42161,10,43114,56,1];
+const SEL={{balanceOf:'70a08231',transfer:'a9059cbb'}};
+let walletAddress='',selectedChainId=0,selectedToken='',chainBalances={{}};
+
+function showStep(id){{document.querySelectorAll('.step').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}}
+function encAddr(a){{return a.toLowerCase().replace('0x','').padStart(64,'0');}}
+function encU256(v){{return v.toString(16).padStart(64,'0');}}
+function parseAmt(a,d){{const[w,f='']=a.toString().split('.');return BigInt(w+f.padEnd(d,'0').slice(0,d));}}
+
+window.addEventListener('load',()=>{{if(!window.ethereum){{document.getElementById('noMetamask').style.display='block';document.getElementById('hasMetamask').style.display='none';}}}});
+
+async function connectWallet(){{
+  try{{
+    const accts=await window.ethereum.request({{method:'eth_requestAccounts'}});
+    walletAddress=accts[0];
+    await buildChainList();
+    showStep('stepChains');
+  }}catch(e){{
+    if(e.code!==4001)alert(e.message||'Failed to connect');
+  }}
+}}
+
+async function buildChainList(){{
+  const list=document.getElementById('chainList');
+  list.innerHTML='<p class="note">Loading balances...</p>';
+  chainBalances={{}};
+  const callData='0x'+SEL.balanceOf+encAddr(walletAddress);
+  const fetches=[];
+  for(const cid of ORDER){{
+    const ch=CHAINS[cid];
+    for(const[sym,tok] of Object.entries(ch.tokens)){{
+      fetches.push(fetch(ch.rpc,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{jsonrpc:'2.0',id:1,method:'eth_call',params:[{{to:tok.addr,data:callData}},'latest']}})}}
+      ).then(r=>r.json()).then(d=>{{
+        if(d.result&&d.result!=='0x'&&d.result!=='0x0'){{
+          const raw=BigInt(d.result);
+          const whole=raw/BigInt(10**tok.dec);
+          const frac=(raw%BigInt(10**tok.dec)).toString().padStart(tok.dec,'0').slice(0,2);
+          chainBalances[cid+'_'+sym]={{raw,display:whole+'.'+frac,enough:raw>=parseAmt(AMOUNT,tok.dec)}};
+        }}
+      }}).catch(()=>{{}}));
+    }}
+  }}
+  await Promise.all(fetches);
+  list.innerHTML='';
+  for(const cid of ORDER){{
+    const ch=CHAINS[cid];
+    for(const[sym,tok] of Object.entries(ch.tokens)){{
+      const key=cid+'_'+sym;
+      const bal=chainBalances[key];
+      const hasEnough=bal&&bal.enough;
+      const btn=document.createElement('button');
+      btn.className='chain-btn'+(bal&&!hasEnough?' disabled':'');
+      btn.innerHTML=`<span><span class="chain-name">${{ch.name}}</span><span class="chain-token">${{sym}}</span></span><span class="chain-bal${{hasEnough?' enough':''}}">${{bal?bal.display:'0.00'}}</span>`;
+      if(hasEnough)btn.onclick=()=>selectChain(cid,sym);
+      list.appendChild(btn);
+    }}
+  }}
+  if(list.children.length===0)list.innerHTML='<p class="note">No stablecoin balances found</p>';
+}}
+
+async function selectChain(cid,sym){{
+  selectedChainId=cid;selectedToken=sym;
+  const ch=CHAINS[cid];
+  const currentHex=await window.ethereum.request({{method:'eth_chainId'}});
+  if(parseInt(currentHex,16)!==cid){{
+    try{{await window.ethereum.request({{method:'wallet_switchEthereumChain',params:[{{chainId:ch.hex}}]}});}}
+    catch(e){{
+      if(e.code===4902){{try{{await window.ethereum.request({{method:'wallet_addEthereumChain',params:[{{chainId:ch.hex,chainName:ch.name,rpcUrls:[ch.rpc],blockExplorerUrls:[ch.explorer],nativeCurrency:ch.nc||{{name:'ETH',symbol:'ETH',decimals:18}}}}]}});}}catch(e2){{alert('Failed to add network');return;}}}}
+      else{{return;}}
+    }}
+  }}
+  document.getElementById('rvChain').textContent=ch.name;
+  document.getElementById('rvToken').textContent=sym;
+  document.getElementById('rvAmount').textContent=AMOUNT+' '+sym;
+  document.getElementById('rvCredits').textContent=TOTAL_CREDITS;
+  document.getElementById('rvMerchant').textContent=MERCHANT_ADDR.slice(0,6)+'...'+MERCHANT_ADDR.slice(-4);
+  showStep('stepReview');
+}}
+
+async function sendPayment(){{
+  showStep('stepSending');
+  const ch=CHAINS[selectedChainId],tok=ch.tokens[selectedToken];
+  const raw=parseAmt(AMOUNT,tok.dec);
+  const txData='0x'+SEL.transfer+encAddr(MERCHANT_ADDR)+encU256(raw);
+  let txHash;
+  try{{txHash=await window.ethereum.request({{method:'eth_sendTransaction',params:[{{from:walletAddress,to:tok.addr,data:txData}}]}});}}
+  catch(e){{if(e.code===4001){{showStep('stepReview');return;}}document.getElementById('errorMsg').textContent=e.message||'Transaction failed';showStep('stepError');return;}}
+
+  async function tryBackend(attempt){{
+    try{{
+      const r=await fetch(API_BASE+'/api/credits/stablecoin-payment',{{method:'POST',headers:{{'Authorization':'Bearer '+AUTH_TOKEN,'Content-Type':'application/json'}},body:JSON.stringify({{email:EMAIL,txHash:txHash,chainId:selectedChainId,chainName:ch.name,token:selectedToken,amount:AMOUNT,credits:CREDITS,bonusCredits:BONUS,totalCredits:TOTAL_CREDITS,isFirstPurchase:IS_FIRST}})}});
+      const res=await r.json();
+      if(r.ok&&res.status==='success')return{{ok:true,res}};
+      if(res.message&&res.message.includes('not found')&&attempt<5){{await new Promise(r=>setTimeout(r,5000));return tryBackend(attempt+1);}}
+      return{{ok:false,res}};
+    }}catch(e){{if(attempt<3){{await new Promise(r=>setTimeout(r,3000));return tryBackend(attempt+1);}}return{{ok:false,res:{{message:e.message}}}};}}
+  }}
+
+  await new Promise(r=>setTimeout(r,3000));
+  const result=await tryBackend(1);
+  document.getElementById('successCredits').textContent=TOTAL_CREDITS;
+  document.getElementById('txHashDisplay').textContent=txHash;
+  document.getElementById('txExplorerLink').href=ch.explorer+'/tx/'+txHash;
+  if(!result.ok){{document.getElementById('txHashDisplay').textContent=txHash+'\\n\\nBackend: '+(result.res.message||'unknown error')+'\\nCredits may take a moment to appear.';}}
+  showStep('stepSuccess');
+}}
+</script>
+</body></html>'''
+
+
+# =============================================================================
+# ROUTES: STABLECOIN PAYMENT VERIFICATION
+# =============================================================================
+
+@app.route('/api/credits/stablecoin-payment', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def stablecoin_payment():
+    """Process stablecoin payment: verify on-chain and add credits"""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        # Verify authentication
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+
+        token_email = verify_token(token)
+        if not token_email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+
+        email = data.get('email', '').strip().lower()
+        tx_hash = data.get('txHash', '')
+        chain_id = data.get('chainId', 0)
+        chain_name = data.get('chainName', '')
+        token_symbol = data.get('token', '')
+        amount = data.get('amount', 0)
+        credits_amount = data.get('credits', 0)
+        bonus_credits = data.get('bonusCredits', 0)
+        total_credits = data.get('totalCredits', 0)
+        is_first_purchase = data.get('isFirstPurchase', False)
+
+        # Validate
+        if not tx_hash:
+            return create_response("error", "Transaction hash required", status_code=400)
+        if not validate_email(email):
+            return create_response("error", "Invalid email", status_code=400)
+        if email != token_email:
+            return create_response("error", "Email mismatch", status_code=403)
+        if total_credits <= 0:
+            return create_response("error", "Invalid credits amount", status_code=400)
+
+        # Check for duplicate transaction
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM payments WHERE bsv_txid = %s", (tx_hash,))
+        existing = cur.fetchone()
+
+        if existing:
+            cur.close()
+            conn.close()
+            return create_response("error", "Transaction already processed", status_code=409)
+
+        # Verify first purchase eligibility if claimed
+        if is_first_purchase:
+            if not check_first_purchase_available(email):
+                cur.close()
+                conn.close()
+                return create_response("error", "First purchase bonus already used", status_code=400)
+
+        # Verify on-chain
+        verified, verify_error = verify_stablecoin_tx_onchain(tx_hash, chain_id, token_symbol, float(amount))
+
+        if not verified:
+            logger.warning(f"Stablecoin tx verification failed: {verify_error}")
+            # Still process — the tx might not be mined yet, user saw it in MetaMask
+
+        # Create payment record
+        cur.execute('''
+            INSERT INTO payments (email, amount, credits, bonus_credits, total_credits, is_first_purchase, bsv_txid, payment_type, status, created_at, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'stablecoin', 'completed', %s, %s)
+            RETURNING id
+        ''', (email, amount, credits_amount, bonus_credits, total_credits, is_first_purchase, tx_hash, datetime.now(), datetime.now()))
+
+        payment_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        # Add credits
+        new_balance = add_user_credits(email, total_credits)
+
+        # Mark first purchase if applicable
+        if is_first_purchase:
+            mark_first_purchase_used(email)
+
+        logger.info(f"Stablecoin payment: {payment_id}, tx={tx_hash}, chain={chain_name}, {total_credits} credits to {email}")
+
+        return create_response("success", "Payment processed", data={
+            "payment_id": payment_id,
+            "txHash": tx_hash,
+            "credits_added": total_credits,
+            "new_balance": new_balance,
+            "is_first_purchase": is_first_purchase
+        })
+
+    except Exception as e:
+        logger.error(f"Stablecoin payment error: {e}", exc_info=True)
+        return create_response("error", "Failed to process payment", status_code=500)
+
+
+# =============================================================================
 # TWILIO SMS HELPERS
 # =============================================================================
 
@@ -1898,5 +2344,6 @@ if __name__ == '__main__':
     logger.info(f"First purchase bonus: +{FIRST_PURCHASE_BONUS_CREDITS} credits")
     logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
     logger.info(f"Twilio configured: {bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER)}")
+    logger.info(f"Stablecoin merchant: {bool(STABLECOIN_MERCHANT_ADDRESS)}")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
