@@ -1593,7 +1593,7 @@ h1{{font-size:20px;text-align:center;margin-bottom:4px}}
 
 <div id="stepConnect" class="step active">
   <div class="amount-box">
-    <div class="amount-big">${{amount}} USDC/USDT</div>
+    <div class="amount-big">${amount} USDC/USDT</div>
     <div class="amount-credits">= {total} Credits{' <span class="bonus-tag">+' + bonus + ' bonus!</span>' if int(bonus) > 0 else ''}</div>
   </div>
   <div id="noMetamask" class="no-metamask" style="display:none">MetaMask not detected.<br/><a href="https://metamask.io/download/" target="_blank">Install MetaMask</a> and refresh this page.</div>
@@ -1602,7 +1602,7 @@ h1{{font-size:20px;text-align:center;margin-bottom:4px}}
 
 <div id="stepChains" class="step">
   <div class="amount-box">
-    <div class="amount-big">${{amount}}</div>
+    <div class="amount-big">${amount}</div>
     <div class="amount-credits">{total} Credits</div>
   </div>
   <p class="note">Select network & stablecoin</p>
