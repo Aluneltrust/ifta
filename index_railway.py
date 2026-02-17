@@ -82,6 +82,11 @@ SQUARE_ENVIRONMENT = os.environ.get('SQUARE_ENVIRONMENT', 'sandbox')
 
 SQUARE_API_URL = 'https://connect.squareupsandbox.com' if SQUARE_ENVIRONMENT == 'sandbox' else 'https://connect.squareup.com'
 
+# Twilio SMS Configuration
+TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER')
+
 
 # =============================================================================
 # DATABASE FUNCTIONS
@@ -817,397 +822,6 @@ def get_password_reset_email_html(reset_url, expires_at):
 
 
 # =============================================================================
-# ROUTES: STABLECOIN PAYMENTS (Browser-based)
-# =============================================================================
-# Add this section to index_railway.py after the BSV payment route.
-# Also add STABLECOIN_MERCHANT_ADDRESS and STABLECOIN_* constants near
-# the other CONSTANTS at the top of the file.
-# =============================================================================
-
-# ---- Add these constants near the top with the other constants ----
-
-# STABLECOIN_MERCHANT_ADDRESS = os.environ.get('STABLECOIN_MERCHANT_ADDRESS', '').lower()
-#
-# STABLECOIN_CHAIN_RPCS = {
-#     1:     'https://eth.llamarpc.com',
-#     8453:  'https://mainnet.base.org',
-#     137:   'https://polygon-rpc.com',
-#     42161: 'https://arb1.arbitrum.io/rpc',
-#     10:    'https://mainnet.optimism.io',
-#     43114: 'https://api.avax.network/ext/bc/C/rpc',
-#     56:    'https://bsc-dataseed.binance.org',
-# }
-#
-# STABLECOIN_CONTRACTS = {
-#     1:     {'0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', '0xdac17f958d2ee523a2206206994597c13d831ec7'},
-#     8453:  {'0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'},
-#     137:   {'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', '0xc2132d05d31c914a87c6611c10748aeb04b58e8f'},
-#     42161: {'0xaf88d065e77c8cc2239327c5edb3a432268e5831', '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9'},
-#     10:    {'0x0b2c639c533813f4aa9d7837caf62653d097ff85', '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58'},
-#     43114: {'0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e', '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7'},
-#     56:    {'0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', '0x55d398326f99059ff775485246999027b3197955'},
-# }
-
-# ---- Routes below ----
-
-
-STABLECOIN_PAY_PAGE = r'''<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MilesOn — Stablecoin Payment</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      padding: 20px; color: #e2e8f0;
-    }
-    .card {
-      background: #1e293b; border: 1px solid #334155; border-radius: 16px;
-      width: 100%; max-width: 460px; overflow: hidden;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-    }
-    .header {
-      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-      padding: 24px; text-align: center;
-    }
-    .header h1 { font-size: 20px; font-weight: 700; color: #fff; margin-bottom: 4px; }
-    .header p { font-size: 13px; color: rgba(255,255,255,0.8); }
-    .body { padding: 24px; }
-    .amount-box {
-      background: #0f172a; border: 1px solid #334155; border-radius: 12px;
-      padding: 20px; text-align: center; margin-bottom: 20px;
-    }
-    .amount-label { font-size: 12px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
-    .amount-value { font-size: 36px; font-weight: 700; color: #fff; margin: 4px 0; }
-    .amount-credits { font-size: 14px; color: #22c55e; font-weight: 500; }
-    .amount-bonus { color: #f59e0b; }
-    .step { display: none; } .step.active { display: block; }
-    .step-title { font-size: 16px; font-weight: 600; color: #f1f5f9; margin-bottom: 12px; }
-    .no-metamask {
-      background: #7f1d1d22; border: 1px solid #991b1b; border-radius: 10px;
-      padding: 16px; text-align: center; color: #fca5a5; font-size: 14px;
-    }
-    .no-metamask a { color: #818cf8; text-decoration: none; font-weight: 600; }
-    .btn {
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      width: 100%; padding: 14px; border: none; border-radius: 10px;
-      font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
-    }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn:hover:not(:disabled) { opacity: 0.9; }
-    .btn-metamask { background: #f6851b; color: #fff; }
-    .btn-primary { background: #6366f1; color: #fff; }
-    .btn-secondary { background: #334155; color: #e2e8f0; }
-    .btn-success { background: #059669; color: #fff; }
-    .wallet-badge {
-      display: flex; align-items: center; gap: 8px;
-      background: #0f172a; border: 1px solid #334155; border-radius: 8px;
-      padding: 10px 14px; margin-bottom: 16px;
-      font-family: monospace; font-size: 13px; color: #94a3b8;
-    }
-    .wallet-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
-    .chain-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; margin-bottom: 12px; }
-    .chain-option {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 12px 14px; background: #0f172a; border: 1px solid #334155;
-      border-radius: 10px; cursor: pointer; transition: border-color 0.15s; color: #e2e8f0;
-    }
-    .chain-option:hover { border-color: #6366f1; }
-    .chain-option.disabled { opacity: 0.4; cursor: not-allowed; }
-    .chain-name { font-size: 14px; font-weight: 500; }
-    .token-badge { font-size: 11px; color: #818cf8; background: #312e81; padding: 2px 6px; border-radius: 4px; font-weight: 600; margin-left: 8px; }
-    .chain-balance { font-size: 13px; font-family: monospace; color: #94a3b8; }
-    .chain-balance.enough { color: #22c55e; }
-    .chain-hint { font-size: 12px; color: #64748b; text-align: center; }
-    .review-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
-    .review-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; }
-    .review-label { color: #94a3b8; } .review-value { color: #f1f5f9; font-weight: 500; }
-    .review-divider { height: 1px; background: #334155; margin: 6px 0; }
-    .review-buttons { display: flex; gap: 10px; } .review-buttons .btn { flex: 1; }
-    .review-note { font-size: 12px; color: #64748b; text-align: center; margin-bottom: 12px; }
-    .sending-box { text-align: center; padding: 30px 0; }
-    .spinner { width: 48px; height: 48px; border: 3px solid #334155; border-top-color: #6366f1; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .success-box { text-align: center; padding: 20px 0; }
-    .success-icon { width: 56px; height: 56px; border-radius: 50%; background: #064e3b; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; font-size: 28px; color: #22c55e; }
-    .tx-hash-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin: 12px 0; font-family: monospace; font-size: 12px; color: #94a3b8; word-break: break-all; }
-    .tx-hash-box a { color: #818cf8; text-decoration: none; }
-    .close-msg { font-size: 13px; color: #64748b; margin-top: 12px; }
-    .error-box { text-align: center; padding: 20px 0; }
-    .error-icon { font-size: 48px; margin-bottom: 12px; color: #f87171; }
-    .error-msg { background: #7f1d1d22; border: 1px solid #991b1b; border-radius: 8px; padding: 10px 14px; color: #fca5a5; font-size: 13px; margin: 12px 0; word-break: break-word; }
-  </style>
-</head>
-<body>
-<div class="card">
-  <div class="header"><h1>MilesOn Payment</h1><p>Pay with USDC or USDT via MetaMask</p></div>
-  <div class="body">
-    <div class="amount-box">
-      <div class="amount-label">Amount to Pay</div>
-      <div class="amount-value" id="displayAmount">$0.00</div>
-      <div class="amount-credits"><span id="displayCredits">0</span> credits<span id="displayBonus" class="amount-bonus" style="display:none"> + <span id="bonusNum">0</span> bonus</span></div>
-    </div>
-    <div class="step active" id="stepConnect">
-      <div id="noMetamask" class="no-metamask" style="display:none">MetaMask not detected.<br/><a href="https://metamask.io/download/" target="_blank">Install MetaMask</a> and refresh this page.</div>
-      <div id="hasMetamask"><button class="btn btn-metamask" id="btnConnect" onclick="connectWallet()">&#129418; Connect MetaMask</button></div>
-    </div>
-    <div class="step" id="stepChain">
-      <div class="wallet-badge"><div class="wallet-dot"></div><span id="walletAddr">0x...</span></div>
-      <p class="step-title">Select network & stablecoin</p>
-      <div class="chain-list" id="chainList"></div>
-      <p class="chain-hint">&#128161; Base & Polygon have the lowest fees</p>
-    </div>
-    <div class="step" id="stepReview">
-      <p class="step-title">Confirm Payment</p>
-      <div class="review-card">
-        <div class="review-row"><span class="review-label">Network</span><span class="review-value" id="reviewChain">-</span></div>
-        <div class="review-row"><span class="review-label">Token</span><span class="review-value" id="reviewToken">-</span></div>
-        <div class="review-row"><span class="review-label">Amount</span><span class="review-value" id="reviewAmount">-</span></div>
-        <div class="review-divider"></div>
-        <div class="review-row"><span class="review-label">Credits</span><span class="review-value" id="reviewCredits">-</span></div>
-      </div>
-      <p class="review-note">MetaMask will ask you to confirm. Gas fees apply.</p>
-      <div class="review-buttons">
-        <button class="btn btn-secondary" onclick="showStep('stepChain')">Back</button>
-        <button class="btn btn-primary" id="btnPay" onclick="sendPayment()">Pay <span id="btnPayAmount">0.00</span> <span id="btnPayToken">USDC</span></button>
-      </div>
-    </div>
-    <div class="step" id="stepSending"><div class="sending-box"><div class="spinner"></div><p class="step-title">Confirm in MetaMask</p><p style="color:#94a3b8;font-size:14px;">Approve the transaction in your MetaMask extension</p></div></div>
-    <div class="step" id="stepSuccess"><div class="success-box"><div class="success-icon">&#10003;</div><p class="step-title" style="color:#22c55e;">Payment Complete!</p><p style="color:#94a3b8;font-size:14px;"><strong id="successCredits">0</strong> credits have been added to your account.</p><div class="tx-hash-box"><span id="txHashDisplay">-</span><br/><a id="txExplorerLink" href="#" target="_blank">View on block explorer &rarr;</a></div><p class="close-msg">You can close this tab and return to MilesOn.</p><button class="btn btn-success" style="margin-top:12px;" onclick="window.close()">Done - Close Tab</button></div></div>
-    <div class="step" id="stepError"><div class="error-box"><div class="error-icon">&#10007;</div><p class="step-title" style="color:#f87171;">Payment Failed</p><div class="error-msg" id="errorMsg">Something went wrong.</div><div class="review-buttons" style="margin-top:16px;"><button class="btn btn-secondary" onclick="window.close()">Close</button><button class="btn btn-primary" onclick="showStep('stepChain')">Try Again</button></div></div></div>
-  </div>
-</div>
-<script>
-const CHAINS={8453:{name:'Base',short:'Base',hex:'0x2105',rpc:'https://mainnet.base.org',explorer:'https://basescan.org',nc:{name:'Ether',symbol:'ETH',decimals:18},tokens:{USDC:{addr:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',dec:6}}},137:{name:'Polygon',short:'MATIC',hex:'0x89',rpc:'https://polygon-rpc.com',explorer:'https://polygonscan.com',nc:{name:'POL',symbol:'POL',decimals:18},tokens:{USDC:{addr:'0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',dec:6},USDT:{addr:'0xc2132D05D31c914a87C6611C10748AEb04B58e8F',dec:6}}},42161:{name:'Arbitrum One',short:'ARB',hex:'0xa4b1',rpc:'https://arb1.arbitrum.io/rpc',explorer:'https://arbiscan.io',nc:{name:'Ether',symbol:'ETH',decimals:18},tokens:{USDC:{addr:'0xaf88d065e77c8cC2239327C5EDb3A432268e5831',dec:6},USDT:{addr:'0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',dec:6}}},10:{name:'Optimism',short:'OP',hex:'0xa',rpc:'https://mainnet.optimism.io',explorer:'https://optimistic.etherscan.io',nc:{name:'Ether',symbol:'ETH',decimals:18},tokens:{USDC:{addr:'0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',dec:6},USDT:{addr:'0x94b008aA00579c1307B0EF2c499aD98a8ce58e58',dec:6}}},43114:{name:'Avalanche',short:'AVAX',hex:'0xa86a',rpc:'https://api.avax.network/ext/bc/C/rpc',explorer:'https://snowtrace.io',nc:{name:'Avalanche',symbol:'AVAX',decimals:18},tokens:{USDC:{addr:'0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',dec:6},USDT:{addr:'0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7',dec:6}}},56:{name:'BNB Chain',short:'BSC',hex:'0x38',rpc:'https://bsc-dataseed.binance.org',explorer:'https://bscscan.com',nc:{name:'BNB',symbol:'BNB',decimals:18},tokens:{USDC:{addr:'0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',dec:18},USDT:{addr:'0x55d398326f99059fF775485246999027B3197955',dec:18}}},1:{name:'Ethereum',short:'ETH',hex:'0x1',rpc:'https://eth.llamarpc.com',explorer:'https://etherscan.io',nc:{name:'Ether',symbol:'ETH',decimals:18},tokens:{USDC:{addr:'0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',dec:6},USDT:{addr:'0xdAC17F958D2ee523a2206206994597C13D831ec7',dec:6}}}};
-const CHAIN_ORDER=[8453,137,42161,10,43114,56,1];
-const SEL={balanceOf:'70a08231',transfer:'a9059cbb'};
-const params=new URLSearchParams(window.location.search);
-const AUTH_TOKEN=params.get('token')||'',EMAIL=params.get('email')||'',AMOUNT=parseFloat(params.get('amount')||'0'),CREDITS=parseInt(params.get('credits')||'0',10),BONUS=parseInt(params.get('bonus')||'0',10),TOTAL_CREDITS=parseInt(params.get('total')||'0',10)||(CREDITS+BONUS),IS_FIRST=params.get('first')==='1',MERCHANT_ADDR=params.get('merchant')||'',API_BASE=window.location.origin;
-document.getElementById('displayAmount').textContent='$'+AMOUNT.toFixed(2);
-document.getElementById('displayCredits').textContent=TOTAL_CREDITS;
-if(BONUS>0){document.getElementById('displayBonus').style.display='inline';document.getElementById('bonusNum').textContent=BONUS;}
-let walletAddress=null,selectedChainId=null,selectedToken=null,balances={};
-function encAddr(a){return a.toLowerCase().replace('0x','').padStart(64,'0');}
-function encU256(v){return BigInt(v).toString(16).padStart(64,'0');}
-function parseAmt(a,d){const[w,f='']=a.toString().split('.');return BigInt(w+f.padEnd(d,'0').slice(0,d));}
-function fmtAmt(r,d){if(r===0n)return'0.00';const dv=BigInt(10**d);return(r/dv)+'.'+(r%dv).toString().padStart(d,'0').slice(0,2);}
-function showStep(id){document.querySelectorAll('.step').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}
-async function connectWallet(){const b=document.getElementById('btnConnect');b.disabled=true;b.textContent='Connecting...';try{const acc=await window.ethereum.request({method:'eth_requestAccounts'});if(!acc||!acc.length)throw new Error('No accounts');walletAddress=acc[0];document.getElementById('walletAddr').textContent=walletAddress.slice(0,6)+'...'+walletAddress.slice(-4);await loadBal();renderChains();showStep('stepChain');}catch(e){alert('Failed: '+(e.message||e));b.disabled=false;b.textContent='\u{1F98A} Connect MetaMask';}}
-async function loadBal(){balances={};const cd='0x'+SEL.balanceOf+encAddr(walletAddress);const ps=[];for(const cid of CHAIN_ORDER){const ch=CHAINS[cid];for(const[sym,tok]of Object.entries(ch.tokens)){ps.push(fetch(ch.rpc,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_call',params:[{to:tok.addr,data:cd},'latest']})}).then(r=>r.json()).then(d=>{if(d.result&&d.result!=='0x'&&d.result!=='0x0'){const raw=BigInt(d.result);if(raw>0n)balances[cid+'-'+sym]=fmtAmt(raw,tok.dec);}}).catch(()=>{}));}}await Promise.all(ps);}
-function renderChains(){const l=document.getElementById('chainList');l.innerHTML='';for(const cid of CHAIN_ORDER){const ch=CHAINS[cid];for(const[sym]of Object.entries(ch.tokens)){const k=cid+'-'+sym,bal=balances[k]||'0.00',bn=parseFloat(bal),ok=bn>=AMOUNT;const d=document.createElement('div');d.className='chain-option'+((!ok&&bn>0)?' disabled':'');d.innerHTML='<div><span class="chain-name">'+ch.name+'</span><span class="token-badge">'+sym+'</span></div><span class="chain-balance'+(ok?' enough':'')+'">'+((bn>0)?bal+' '+sym:'\u2014')+'</span>';if(ok||bn===0)d.onclick=()=>selChain(cid,sym);l.appendChild(d);}}}
-async function selChain(cid,tok){selectedChainId=cid;selectedToken=tok;const ch=CHAINS[cid];try{const cur=await window.ethereum.request({method:'eth_chainId'});if(parseInt(cur,16)!==cid){try{await window.ethereum.request({method:'wallet_switchEthereumChain',params:[{chainId:ch.hex}]});}catch(e){if(e.code===4902)await window.ethereum.request({method:'wallet_addEthereumChain',params:[{chainId:ch.hex,chainName:ch.name,nativeCurrency:ch.nc,rpcUrls:[ch.rpc],blockExplorerUrls:[ch.explorer]}]});else throw e;}}}catch(e){alert('Switch failed: '+(e.message||e));return;}document.getElementById('reviewChain').textContent=ch.name;document.getElementById('reviewToken').textContent=tok;document.getElementById('reviewAmount').textContent=AMOUNT.toFixed(2)+' '+tok;document.getElementById('reviewCredits').textContent=CREDITS+(IS_FIRST&&BONUS>0?' + '+BONUS+' bonus':'')+' = '+TOTAL_CREDITS;document.getElementById('btnPayAmount').textContent=AMOUNT.toFixed(2);document.getElementById('btnPayToken').textContent=tok;showStep('stepReview');}
-async function sendPayment(){showStep('stepSending');const ch=CHAINS[selectedChainId],tok=ch.tokens[selectedToken],raw=parseAmt(AMOUNT,tok.dec),txData='0x'+SEL.transfer+encAddr(MERCHANT_ADDR)+encU256(raw);let txHash;try{txHash=await window.ethereum.request({method:'eth_sendTransaction',params:[{from:walletAddress,to:tok.addr,data:txData}]});}catch(e){if(e.code===4001){showStep('stepReview');return;}document.getElementById('errorMsg').textContent=e.message||'Transaction failed';showStep('stepError');return;}console.log('TX sent:',txHash);async function tryBackend(attempt){console.log('Backend attempt',attempt);try{const r=await fetch(API_BASE+'/api/credits/stablecoin-payment',{method:'POST',headers:{'Authorization':'Bearer '+AUTH_TOKEN,'Content-Type':'application/json'},body:JSON.stringify({email:EMAIL,txHash:txHash,chainId:selectedChainId,chainName:ch.name,token:selectedToken,amount:AMOUNT,credits:CREDITS,bonusCredits:BONUS,totalCredits:TOTAL_CREDITS,isFirstPurchase:IS_FIRST})});const res=await r.json();console.log('Backend response:',r.status,res);if(r.ok&&res.status==='success'){return{ok:true,res:res};}if(res.message&&res.message.includes('not found')&&attempt<5){console.log('TX not mined yet, retrying in 5s...');await new Promise(r=>setTimeout(r,5000));return tryBackend(attempt+1);}return{ok:false,res:res};}catch(e){console.error('Backend fetch error:',e);if(attempt<3){await new Promise(r=>setTimeout(r,3000));return tryBackend(attempt+1);}return{ok:false,res:{message:e.message}};}}await new Promise(r=>setTimeout(r,3000));const result=await tryBackend(1);document.getElementById('successCredits').textContent=TOTAL_CREDITS;document.getElementById('txHashDisplay').textContent=txHash;document.getElementById('txExplorerLink').href=ch.explorer+'/tx/'+txHash;if(!result.ok){document.getElementById('txHashDisplay').textContent=txHash+'\n\nBackend: '+(result.res.message||'unknown error')+'\nCredits may take a moment to appear.';}showStep('stepSuccess');}
-if(typeof window.ethereum==='undefined'){document.getElementById('noMetamask').style.display='block';document.getElementById('hasMetamask').style.display='none';}
-</script>
-</body></html>'''
-
-
-@app.route('/pay/stablecoin', methods=['GET'])
-def stablecoin_pay_page():
-    """Serve the stablecoin payment page for browser-based MetaMask payments"""
-    return STABLECOIN_PAY_PAGE, 200, {'Content-Type': 'text/html'}
-
-
-# --- On-chain verification helper ---
-
-STABLECOIN_MERCHANT_ADDRESS = os.environ.get('STABLECOIN_MERCHANT_ADDRESS', '').lower()
-
-STABLECOIN_CHAIN_RPCS = {
-    1:     'https://eth.llamarpc.com',
-    8453:  'https://mainnet.base.org',
-    137:   'https://polygon-rpc.com',
-    42161: 'https://arb1.arbitrum.io/rpc',
-    10:    'https://mainnet.optimism.io',
-    43114: 'https://api.avax.network/ext/bc/C/rpc',
-    56:    'https://bsc-dataseed.binance.org',
-}
-
-STABLECOIN_CONTRACTS = {
-    1:     {'0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', '0xdac17f958d2ee523a2206206994597c13d831ec7'},
-    8453:  {'0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'},
-    137:   {'0x3c499c542cef5e3811e1192ce70d8cc03d5c3359', '0xc2132d05d31c914a87c6611c10748aeb04b58e8f'},
-    42161: {'0xaf88d065e77c8cc2239327c5edb3a432268e5831', '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9'},
-    10:    {'0x0b2c639c533813f4aa9d7837caf62653d097ff85', '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58'},
-    43114: {'0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e', '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7'},
-    56:    {'0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', '0x55d398326f99059ff775485246999027b3197955'},
-}
-
-
-def verify_stablecoin_tx_onchain(tx_hash, chain_id, expected_token, expected_amount_usd):
-    """Verify a stablecoin transaction on-chain"""
-    rpc_url = STABLECOIN_CHAIN_RPCS.get(chain_id)
-    if not rpc_url:
-        return False, f"Unsupported chain: {chain_id}"
-
-    if not STABLECOIN_MERCHANT_ADDRESS:
-        logger.warning("STABLECOIN_MERCHANT_ADDRESS not configured - skipping on-chain verification, trusting client")
-        return True, None
-
-    try:
-        # Try to get receipt - tx may not be mined yet
-        response = requests.post(rpc_url, json={
-            'jsonrpc': '2.0', 'id': 1,
-            'method': 'eth_getTransactionReceipt',
-            'params': [tx_hash],
-        }, timeout=15)
-
-        data = response.json()
-        receipt = data.get('result')
-
-        if not receipt:
-            # Transaction exists but not yet mined - check it at least exists
-            tx_response = requests.post(rpc_url, json={
-                'jsonrpc': '2.0', 'id': 2,
-                'method': 'eth_getTransactionByHash',
-                'params': [tx_hash],
-            }, timeout=15)
-            tx_data = tx_response.json()
-            tx = tx_data.get('result')
-            
-            if not tx:
-                return False, "Transaction not found on chain"
-            
-            # Transaction exists but pending - trust it for now
-            # (it was signed by MetaMask, sent to the right contract)
-            tx_to = (tx.get('to') or '').lower()
-            known_contracts = STABLECOIN_CONTRACTS.get(chain_id, set())
-            if tx_to in known_contracts:
-                logger.info(f"Stablecoin tx {tx_hash} exists but pending - accepting (target={tx_to})")
-                return True, None
-            else:
-                return False, f"Transaction target {tx_to} is not a known stablecoin contract"
-
-        if receipt.get('status', '0x0') != '0x1':
-            return False, "Transaction failed on-chain"
-
-        tx_to = (receipt.get('to') or '').lower()
-        known_contracts = STABLECOIN_CONTRACTS.get(chain_id, set())
-        if tx_to not in known_contracts:
-            return False, f"Target {tx_to} is not a known stablecoin contract"
-
-        transfer_topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-        for log in receipt.get('logs', []):
-            topics = log.get('topics', [])
-            if len(topics) >= 3 and topics[0] == transfer_topic:
-                log_to = '0x' + topics[2][-40:]
-                if log_to.lower() == STABLECOIN_MERCHANT_ADDRESS:
-                    return True, None
-
-        # If receipt exists and succeeded but no Transfer to merchant found,
-        # still accept if the tx was to a known contract (edge case with log parsing)
-        logger.warning(f"Stablecoin tx {tx_hash}: receipt OK but no Transfer event to merchant found - accepting anyway")
-        return True, None
-
-    except requests.exceptions.Timeout:
-        # Network timeout - trust the client since MetaMask signed it
-        logger.warning(f"RPC timeout verifying {tx_hash} - accepting")
-        return True, None
-    except Exception as e:
-        logger.error(f"On-chain verification error: {e}")
-        # On error, still accept - better to give credits than lose a paying customer
-        logger.warning(f"Verification error for {tx_hash} - accepting anyway: {e}")
-        return True, None
-
-
-@app.route('/api/credits/stablecoin-payment', methods=['POST', 'OPTIONS'])
-@cross_origin()
-def stablecoin_payment():
-    """Process stablecoin payment: verify on-chain and add credits"""
-    if request.method == 'OPTIONS':
-        return '', 204
-
-    try:
-        token = extract_token_from_request()
-        if not token:
-            return create_response("error", "Authentication required", status_code=401)
-
-        token_email = verify_token(token)
-        if not token_email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-
-        data = request.get_json()
-        if not data:
-            return create_response("error", "No JSON data provided", status_code=400)
-
-        email = data.get('email', '').strip().lower()
-        tx_hash = data.get('txHash', '').strip()
-        chain_id = data.get('chainId', 0)
-        token_symbol = data.get('token', '')
-        chain_name = data.get('chainName', '')
-        amount = data.get('amount', 0)
-        credits = data.get('credits', 0)
-        bonus_credits = data.get('bonusCredits', 0)
-        total_credits = data.get('totalCredits', 0)
-        is_first_purchase = data.get('isFirstPurchase', False)
-
-        if not tx_hash or not tx_hash.startswith('0x'):
-            return create_response("error", "Valid transaction hash required", status_code=400)
-        if not validate_email(email):
-            return create_response("error", "Invalid email", status_code=400)
-        if email != token_email:
-            return create_response("error", "Email mismatch", status_code=403)
-        if total_credits <= 0:
-            return create_response("error", "Invalid credits amount", status_code=400)
-
-        # Duplicate check
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute('SELECT id FROM payments WHERE bsv_txid = %s', (tx_hash,))
-        if cur.fetchone():
-            cur.close()
-            conn.close()
-            return create_response("error", "Transaction already processed", status_code=409)
-
-        # First purchase check
-        if is_first_purchase and not check_first_purchase_available(email):
-            cur.close()
-            conn.close()
-            return create_response("error", "First purchase bonus already used", status_code=400)
-
-        # On-chain verification
-        verified, verify_error = verify_stablecoin_tx_onchain(tx_hash, chain_id, token_symbol, float(amount))
-        if not verified:
-            cur.close()
-            conn.close()
-            logger.warning(f"Stablecoin tx verification failed: {tx_hash} - {verify_error}")
-            return create_response("error", f"Verification failed: {verify_error}", status_code=400)
-
-        # Record payment
-        cur.execute('''
-            INSERT INTO payments (email, amount, credits, bonus_credits, total_credits,
-                 is_first_purchase, bsv_txid, payment_type, status, created_at, completed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'stablecoin', 'completed', %s, %s)
-            RETURNING id
-        ''', (email, amount, credits, bonus_credits, total_credits,
-              is_first_purchase, tx_hash, datetime.now(), datetime.now()))
-
-        payment_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        new_balance = add_user_credits(email, total_credits)
-        if is_first_purchase:
-            mark_first_purchase_used(email)
-
-        logger.info(f"Stablecoin payment: id={payment_id}, tx={tx_hash}, chain={chain_name}, "
-                     f"token={token_symbol}, amount=${amount}, credits={total_credits}, user={email}")
-
-        return create_response("success", "Payment processed", data={
-            "payment_id": payment_id, "txHash": tx_hash, "credits_added": total_credits,
-            "new_balance": new_balance, "is_first_purchase": is_first_purchase,
-        })
-
-    except Exception as e:
-        logger.error(f"Stablecoin payment error: {e}", exc_info=True)
-        return create_response("error", "Failed to process payment", status_code=500)
-    
-# =============================================================================
 # ROUTES: HEALTH CHECK
 # =============================================================================
 @app.route('/health', methods=['GET'])
@@ -1217,9 +831,10 @@ def health_check():
         status="success",
         message="Railway User Management API",
         data={
-            "version": "3.0.0",
-            "features": ["auth", "credits", "first_purchase_bonus", "square_payments"],
+            "version": "3.1.0",
+            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "sms_messaging"],
             "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID),
+            "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER),
             "first_purchase_bonus": {
                 "bonus_credits": FIRST_PURCHASE_BONUS_CREDITS,
                 "description": f"+{FIRST_PURCHASE_BONUS_CREDITS} bonus credits on first purchase"
@@ -1815,6 +1430,415 @@ def verify_payment():
 
 
 # =============================================================================
+# TWILIO SMS HELPERS
+# =============================================================================
+
+def normalize_phone(phone):
+    """Normalize phone number to E.164 format (+1XXXXXXXXXX)"""
+    if not phone:
+        return None
+    digits = re.sub(r'[^\d+]', '', phone)
+    if digits.startswith('+'):
+        return digits
+    digits = re.sub(r'[^\d]', '', digits)
+    if len(digits) == 10:
+        return f'+1{digits}'
+    if len(digits) == 11 and digits.startswith('1'):
+        return f'+{digits}'
+    return f'+{digits}'
+
+
+def parse_driver_reply(body):
+    """Parse driver's SMS reply into confirmed/declined/unknown"""
+    if not body:
+        return 'unknown'
+    cleaned = body.strip().lower()
+    confirmed_words = ['yes', 'y', 'ok', 'confirm', 'confirmed', 'accept', 'accepted',
+                       '10-4', '10 4', 'copy', 'roger', 'affirmative', 'sure', 'yep',
+                       'yeah', 'yea', 'da', 'si']
+    declined_words = ['no', 'n', 'decline', 'declined', 'reject', 'rejected', 'pass',
+                      "can't", 'cannot', 'cant', 'nope', 'negative', 'nah', 'net', 'nyet']
+    if cleaned in confirmed_words or any(cleaned.startswith(w + ' ') for w in confirmed_words[:5]):
+        return 'confirmed'
+    if cleaned in declined_words or any(cleaned.startswith(w + ' ') for w in declined_words[:5]):
+        return 'declined'
+    return 'unknown'
+
+
+def build_route_message(route_summary, route_link=None, pickup_info=None, 
+                        delivery_info=None, estimated_miles=None, notes=None):
+    """Build the route confirmation SMS text"""
+    lines = [f"New Route: {route_summary}"]
+    if estimated_miles:
+        lines.append(f"Distance: {estimated_miles} miles")
+    if pickup_info:
+        lines.append(f"Pickup: {pickup_info}")
+    if delivery_info:
+        lines.append(f"Delivery: {delivery_info}")
+    if route_link:
+        lines.append(f"Map: {route_link}")
+    if notes:
+        lines.append(f"Notes: {notes}")
+    lines.append("")
+    lines.append("Reply YES to confirm or NO to decline.")
+    return "\n".join(lines)
+
+
+def twilio_send_sms(to_phone, message):
+    """Send SMS via Twilio REST API (no SDK needed)"""
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+        return {'success': False, 'error': 'Twilio not configured'}
+    
+    to_normalized = normalize_phone(to_phone)
+    if not to_normalized:
+        return {'success': False, 'error': 'Invalid phone number'}
+    
+    try:
+        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+        response = requests.post(
+            url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                'From': TWILIO_PHONE_NUMBER,
+                'To': to_normalized,
+                'Body': message
+            },
+            timeout=30
+        )
+        
+        if response.status_code in (200, 201):
+            data = response.json()
+            return {
+                'success': True,
+                'message_sid': data.get('sid'),
+                'to': to_normalized,
+                'status': data.get('status')
+            }
+        else:
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+            error_msg = error_data.get('message', f'Twilio API error: {response.status_code}')
+            logger.error(f"Twilio send failed: {response.status_code} - {error_msg}")
+            return {'success': False, 'error': error_msg}
+    except requests.exceptions.Timeout:
+        return {'success': False, 'error': 'Twilio request timeout'}
+    except Exception as e:
+        logger.error(f"Twilio send error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def twilio_check_replies(from_phone, since_timestamp=None):
+    """Check for inbound SMS replies from a specific phone number"""
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+        return {'success': False, 'error': 'Twilio not configured', 'replies': []}
+    
+    from_normalized = normalize_phone(from_phone)
+    if not from_normalized:
+        return {'success': False, 'error': 'Invalid phone number', 'replies': []}
+    
+    try:
+        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+        params = {
+            'To': TWILIO_PHONE_NUMBER,
+            'From': from_normalized,
+            'PageSize': 10,
+        }
+        if since_timestamp:
+            try:
+                dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
+                params['DateSent>'] = dt.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        
+        response = requests.get(
+            url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            params=params,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            messages = data.get('messages', [])
+            
+            replies = []
+            for msg in messages:
+                if msg.get('direction') in ('inbound',):
+                    msg_time = msg.get('date_sent', '')
+                    # Filter by since timestamp if provided
+                    if since_timestamp and msg_time:
+                        try:
+                            msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
+                            since_dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00').replace('+00:00', ''))
+                            if msg_dt < since_dt:
+                                continue
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    replies.append({
+                        'body': msg.get('body', ''),
+                        'timestamp': msg_time,
+                        'from': msg.get('from', ''),
+                        'sid': msg.get('sid', '')
+                    })
+            
+            return {'success': True, 'replies': replies}
+        else:
+            logger.error(f"Twilio check replies failed: {response.status_code}")
+            return {'success': False, 'error': f'Twilio API error: {response.status_code}', 'replies': []}
+    except Exception as e:
+        logger.error(f"Twilio check replies error: {e}")
+        return {'success': False, 'error': str(e), 'replies': []}
+
+
+# =============================================================================
+# ROUTES: SMS MESSAGING
+# =============================================================================
+
+@app.route('/api/messaging/send', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_send():
+    """Send a free-form SMS to a driver"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
+        driver_name = data.get('driverName', '')
+        message = data.get('message', '')
+        phone = data.get('phone', '')
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
+        if not message:
+            return create_response("error", "message is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_send_sms(phone, message)
+        
+        if result['success']:
+            return create_response("success", "Message sent", data={
+                "success": True,
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
+                "driver": driver_name,
+                "sent_at": datetime.now().isoformat()
+            })
+        else:
+            return create_response("error", result.get('error', 'Failed to send'), 
+                                   data={"success": False, "error": result.get('error')}, status_code=500)
+    except Exception as e:
+        logger.error(f"Messaging send error: {e}", exc_info=True)
+        return create_response("error", "Failed to send message", status_code=500)
+
+
+@app.route('/api/messaging/send-route', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_send_route():
+    """Send a route confirmation SMS to a driver"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
+        driver_name = data.get('driverName', '')
+        phone = data.get('phone', '')
+        route_summary = data.get('routeSummary', '')
+        route_link = data.get('routeLink')
+        pickup_info = data.get('pickupInfo')
+        delivery_info = data.get('deliveryInfo')
+        estimated_miles = data.get('estimatedMiles')
+        notes = data.get('notes')
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
+        if not route_summary:
+            return create_response("error", "routeSummary is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        message = build_route_message(
+            route_summary=route_summary,
+            route_link=route_link,
+            pickup_info=pickup_info,
+            delivery_info=delivery_info,
+            estimated_miles=estimated_miles,
+            notes=notes
+        )
+        
+        result = twilio_send_sms(phone, message)
+        
+        if result['success']:
+            return create_response("success", "Route sent to driver", data={
+                "success": True,
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
+                "driver": driver_name,
+                "sent_at": datetime.now().isoformat(),
+                "route_summary": route_summary
+            })
+        else:
+            return create_response("error", result.get('error', 'Failed to send'), 
+                                   data={"success": False, "error": result.get('error')}, status_code=500)
+    except Exception as e:
+        logger.error(f"Messaging send-route error: {e}", exc_info=True)
+        return create_response("error", "Failed to send route", status_code=500)
+
+
+@app.route('/api/messaging/check-reply', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_check_reply():
+    """Check for driver's SMS reply"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
+        driver_name = data.get('driverName', '')
+        phone = data.get('phone', '')
+        since = data.get('since')
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_check_replies(phone, since)
+        
+        if not result['success']:
+            return create_response("error", result.get('error', 'Failed to check replies'),
+                                   data={"status": "error", "driver": driver_name, "error": result.get('error')},
+                                   status_code=500)
+        
+        replies = result.get('replies', [])
+        
+        if not replies:
+            return create_response("success", "No reply yet", data={
+                "status": "pending",
+                "replies": [],
+                "driver": driver_name
+            })
+        
+        # Parse the latest reply
+        latest = replies[0]
+        reply_status = parse_driver_reply(latest.get('body', ''))
+        
+        return create_response("success", "Reply found", data={
+            "status": reply_status,
+            "replies": replies,
+            "latest_reply": latest,
+            "driver": driver_name
+        })
+    except Exception as e:
+        logger.error(f"Messaging check-reply error: {e}", exc_info=True)
+        return create_response("error", "Failed to check reply", status_code=500)
+
+
+@app.route('/api/messaging/test', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_test():
+    """Test Twilio connection"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+            return create_response("error", "Twilio not configured", 
+                                   data={"success": False, "message": "Missing Twilio credentials"}, status_code=500)
+        
+        # Verify credentials by fetching account info
+        try:
+            url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}.json'
+            response = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=10)
+            
+            if response.status_code == 200:
+                return create_response("success", "Twilio connection OK", data={
+                    "success": True,
+                    "message": "Twilio is configured and connected",
+                    "phone_number": TWILIO_PHONE_NUMBER
+                })
+            else:
+                return create_response("error", "Twilio credentials invalid",
+                                       data={"success": False, "message": "Invalid Twilio credentials"}, status_code=500)
+        except Exception as e:
+            return create_response("error", f"Twilio connection failed: {str(e)}",
+                                   data={"success": False}, status_code=500)
+    except Exception as e:
+        logger.error(f"Messaging test error: {e}", exc_info=True)
+        return create_response("error", "Test failed", status_code=500)
+
+
+@app.route('/api/messaging/test-message', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_test_message():
+    """Send a test SMS"""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        token = extract_token_from_request()
+        if not token:
+            return create_response("error", "Authentication required", status_code=401)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        data = request.get_json()
+        phone = data.get('phone', '') if data else ''
+        
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_send_sms(phone, "Test message from MilesOn. If you received this, SMS is working!")
+        
+        if result['success']:
+            return create_response("success", "Test message sent", data={
+                "success": True,
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
+                "sent_at": datetime.now().isoformat()
+            })
+        else:
+            return create_response("error", result.get('error', 'Failed to send'),
+                                   data={"success": False, "error": result.get('error')}, status_code=500)
+    except Exception as e:
+        logger.error(f"Messaging test-message error: {e}", exc_info=True)
+        return create_response("error", "Failed to send test", status_code=500)
+
+
+# =============================================================================
 # ROUTES: DEBUG
 # =============================================================================
 @app.route('/api/debug/database', methods=['GET', 'OPTIONS'])
@@ -1873,5 +1897,6 @@ if __name__ == '__main__':
     logger.info(f"Port: {port}")
     logger.info(f"First purchase bonus: +{FIRST_PURCHASE_BONUS_CREDITS} credits")
     logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
+    logger.info(f"Twilio configured: {bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER)}")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
