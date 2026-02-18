@@ -82,10 +82,8 @@ SQUARE_ENVIRONMENT = os.environ.get('SQUARE_ENVIRONMENT', 'sandbox')
 
 SQUARE_API_URL = 'https://connect.squareupsandbox.com' if SQUARE_ENVIRONMENT == 'sandbox' else 'https://connect.squareup.com'
 
-# Twilio SMS Configuration
-TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN')
-TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER')
+# Telegram Bot Configuration
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 
 # =============================================================================
@@ -832,9 +830,9 @@ def health_check():
         message="Railway User Management API",
         data={
             "version": "3.1.0",
-            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "sms_messaging", "stablecoin_payments"],
+            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "telegram_messaging", "stablecoin_payments"],
             "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID),
-            "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER),
+            "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
             "stablecoin_merchant": bool(os.environ.get('STABLECOIN_MERCHANT_ADDRESS')),
             "first_purchase_bonus": {
                 "bonus_credits": FIRST_PURCHASE_BONUS_CREDITS,
@@ -1541,6 +1539,7 @@ def stablecoin_pay_page():
     amount = request.args.get('amount', '10')
     credits_param = request.args.get('credits', amount)
     bonus = request.args.get('bonus', '0')
+    crypto_bonus = request.args.get('cryptoBonus', '0')
     total = request.args.get('total', credits_param)
     is_first = request.args.get('first', '0')
     merchant = request.args.get('merchant', STABLECOIN_MERCHANT_ADDRESS)
@@ -1594,7 +1593,7 @@ h1{{font-size:20px;text-align:center;margin-bottom:4px}}
 <div id="stepConnect" class="step active">
   <div class="amount-box">
     <div class="amount-big">${amount} USDC/USDT</div>
-    <div class="amount-credits">= {total} Credits{' <span class="bonus-tag">+' + bonus + ' bonus!</span>' if int(bonus) > 0 else ''}</div>
+    <div class="amount-credits">= {total} Credits{' <span class="bonus-tag">+' + crypto_bonus + ' crypto bonus (10%)</span>' if int(crypto_bonus) > 0 else ''}{' <span class="bonus-tag">+' + bonus + ' first purchase!</span>' if int(bonus) > 0 else ''}</div>
   </div>
   <div id="noMetamask" class="no-metamask" style="display:none">MetaMask not detected.<br/><a href="https://metamask.io/download/" target="_blank">Install MetaMask</a> and refresh this page.</div>
   <div id="hasMetamask"><button class="btn btn-metamask" id="btnConnect" onclick="connectWallet()">&#129418; Connect MetaMask</button></div>
@@ -1875,35 +1874,24 @@ def stablecoin_payment():
         return create_response("error", "Failed to process payment", status_code=500)
 
 
+
 # =============================================================================
-# TWILIO SMS HELPERS
+# TELEGRAM BOT HELPERS
 # =============================================================================
 
-def normalize_phone(phone):
-    """Normalize phone number to E.164 format (+1XXXXXXXXXX)"""
-    if not phone:
-        return None
-    digits = re.sub(r'[^\d+]', '', phone)
-    if digits.startswith('+'):
-        return digits
-    digits = re.sub(r'[^\d]', '', digits)
-    if len(digits) == 10:
-        return f'+1{digits}'
-    if len(digits) == 11 and digits.startswith('1'):
-        return f'+{digits}'
-    return f'+{digits}'
+TELEGRAM_API = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}' if TELEGRAM_BOT_TOKEN else ''
 
 
 def parse_driver_reply(body):
-    """Parse driver's SMS reply into confirmed/declined/unknown"""
+    """Parse driver's reply into confirmed/declined/unknown"""
     if not body:
         return 'unknown'
     cleaned = body.strip().lower()
     confirmed_words = ['yes', 'y', 'ok', 'confirm', 'confirmed', 'accept', 'accepted',
                        '10-4', '10 4', 'copy', 'roger', 'affirmative', 'sure', 'yep',
-                       'yeah', 'yea', 'da', 'si']
+                       'yeah', 'yea', 'da', 'si', '/yes']
     declined_words = ['no', 'n', 'decline', 'declined', 'reject', 'rejected', 'pass',
-                      "can't", 'cannot', 'cant', 'nope', 'negative', 'nah', 'net', 'nyet']
+                      "can't", 'cannot', 'cant', 'nope', 'negative', 'nah', 'net', 'nyet', '/no']
     if cleaned in confirmed_words or any(cleaned.startswith(w + ' ') for w in confirmed_words[:5]):
         return 'confirmed'
     if cleaned in declined_words or any(cleaned.startswith(w + ' ') for w in declined_words[:5]):
@@ -1911,176 +1899,172 @@ def parse_driver_reply(body):
     return 'unknown'
 
 
-def build_route_message(route_summary, route_link=None, pickup_info=None, 
+def build_route_message(route_summary, route_link=None, pickup_info=None,
                         delivery_info=None, estimated_miles=None, notes=None):
-    """Build the route confirmation SMS text"""
-    lines = [f"New Route: {route_summary}"]
+    """Build a formatted route message for Telegram (supports Markdown)"""
+    lines = [f"\U0001f4cd *New Route Assignment*", f"Route: {route_summary}"]
     if estimated_miles:
-        lines.append(f"Distance: {estimated_miles} miles")
+        lines.append(f"Distance: ~{estimated_miles} miles")
+    if route_link:
+        lines.append(f"[Open in Google Maps]({route_link})")
     if pickup_info:
         lines.append(f"Pickup: {pickup_info}")
     if delivery_info:
         lines.append(f"Delivery: {delivery_info}")
-    if route_link:
-        lines.append(f"Map: {route_link}")
     if notes:
         lines.append(f"Notes: {notes}")
     lines.append("")
-    lines.append("Reply YES to confirm or NO to decline.")
+    lines.append("Reply *YES* to confirm or *NO* to decline.")
     return "\n".join(lines)
 
 
-def twilio_send_sms(to_phone, message):
-    """Send SMS via Twilio REST API (no SDK needed)"""
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        return {'success': False, 'error': 'Twilio not configured'}
-    
-    to_normalized = normalize_phone(to_phone)
-    if not to_normalized:
-        return {'success': False, 'error': 'Invalid phone number'}
-    
+def telegram_send_message(chat_id, message, parse_mode='Markdown'):
+    """Send a message via Telegram Bot API"""
+    if not TELEGRAM_BOT_TOKEN:
+        return {'success': False, 'error': 'Telegram bot token not configured'}
+    if not chat_id:
+        return {'success': False, 'error': 'No chat_id provided'}
+
     try:
-        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
-        response = requests.post(
-            url,
-            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            data={
-                'From': TWILIO_PHONE_NUMBER,
-                'To': to_normalized,
-                'Body': message
-            },
-            timeout=30
-        )
-        
-        if response.status_code in (200, 201):
-            data = response.json()
+        url = f'{TELEGRAM_API}/sendMessage'
+        response = requests.post(url, json={
+            'chat_id': chat_id,
+            'text': message,
+            'parse_mode': parse_mode,
+        }, timeout=10)
+
+        data = response.json()
+        if data.get('ok'):
+            msg = data.get('result', {})
             return {
                 'success': True,
-                'message_sid': data.get('sid'),
-                'to': to_normalized,
-                'status': data.get('status')
+                'message_id': msg.get('message_id'),
+                'chat_id': chat_id,
             }
         else:
-            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
-            error_msg = error_data.get('message', f'Twilio API error: {response.status_code}')
-            logger.error(f"Twilio send failed: {response.status_code} - {error_msg}")
-            return {'success': False, 'error': error_msg}
+            error_desc = data.get('description', 'Unknown Telegram error')
+            logger.error(f"Telegram send failed: {error_desc}")
+            return {'success': False, 'error': error_desc}
+
     except requests.exceptions.Timeout:
-        return {'success': False, 'error': 'Twilio request timeout'}
+        return {'success': False, 'error': 'Telegram API timeout'}
     except Exception as e:
-        logger.error(f"Twilio send error: {e}")
+        logger.error(f"Telegram send error: {e}")
         return {'success': False, 'error': str(e)}
 
 
-def twilio_check_replies(from_phone, since_timestamp=None):
-    """Check for inbound SMS replies from a specific phone number"""
-    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-        return {'success': False, 'error': 'Twilio not configured', 'replies': []}
-    
-    from_normalized = normalize_phone(from_phone)
-    if not from_normalized:
-        return {'success': False, 'error': 'Invalid phone number', 'replies': []}
-    
+def telegram_get_updates(offset=None, timeout=0):
+    """Get recent messages sent to the bot"""
+    if not TELEGRAM_BOT_TOKEN:
+        return {'success': False, 'error': 'Telegram bot token not configured'}
+
     try:
-        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
-        params = {
-            'To': TWILIO_PHONE_NUMBER,
-            'From': from_normalized,
-            'PageSize': 10,
-        }
-        if since_timestamp:
-            try:
-                dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
-                params['DateSent>'] = dt.strftime('%Y-%m-%d')
-            except (ValueError, AttributeError):
-                pass
-        
-        response = requests.get(
-            url,
-            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            params=params,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            messages = data.get('messages', [])
-            
-            replies = []
-            for msg in messages:
-                if msg.get('direction') in ('inbound',):
-                    msg_time = msg.get('date_sent', '')
-                    # Filter by since timestamp if provided
-                    if since_timestamp and msg_time:
-                        try:
-                            msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
-                            since_dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00').replace('+00:00', ''))
-                            if msg_dt < since_dt:
-                                continue
-                        except (ValueError, AttributeError):
-                            pass
-                    
-                    replies.append({
-                        'body': msg.get('body', ''),
-                        'timestamp': msg_time,
-                        'from': msg.get('from', ''),
-                        'sid': msg.get('sid', '')
-                    })
-            
-            return {'success': True, 'replies': replies}
+        url = f'{TELEGRAM_API}/getUpdates'
+        params = {'timeout': timeout}
+        if offset:
+            params['offset'] = offset
+
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+
+        if data.get('ok'):
+            return {'success': True, 'updates': data.get('result', [])}
         else:
-            logger.error(f"Twilio check replies failed: {response.status_code}")
-            return {'success': False, 'error': f'Twilio API error: {response.status_code}', 'replies': []}
+            return {'success': False, 'error': data.get('description', 'Failed to get updates')}
+
     except Exception as e:
-        logger.error(f"Twilio check replies error: {e}")
-        return {'success': False, 'error': str(e), 'replies': []}
+        logger.error(f"Telegram getUpdates error: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def telegram_check_replies(chat_id, since_timestamp=None):
+    """Check for replies from a specific chat_id since a given timestamp"""
+    result = telegram_get_updates()
+    if not result.get('success'):
+        return result
+
+    replies = []
+    since_unix = None
+    if since_timestamp:
+        try:
+            if isinstance(since_timestamp, str):
+                since_dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
+                since_unix = since_dt.timestamp()
+            else:
+                since_unix = float(since_timestamp)
+        except (ValueError, TypeError):
+            since_unix = None
+
+    for update in result.get('updates', []):
+        msg = update.get('message', {})
+        msg_chat_id = str(msg.get('chat', {}).get('id', ''))
+        msg_date = msg.get('date', 0)
+        msg_text = msg.get('text', '')
+
+        if msg_chat_id != str(chat_id):
+            continue
+        if since_unix and msg_date <= since_unix:
+            continue
+        if msg_text:
+            replies.append({
+                'body': msg_text,
+                'timestamp': datetime.fromtimestamp(msg_date).isoformat(),
+                'from': msg_chat_id,
+                'update_id': update.get('update_id'),
+            })
+
+    status = 'pending'
+    latest_reply = None
+    if replies:
+        latest_reply = replies[-1]
+        status = parse_driver_reply(latest_reply['body'])
+
+    return {
+        'success': True,
+        'status': status,
+        'replies': replies,
+        'latest_reply': latest_reply,
+    }
 
 
 # =============================================================================
-# ROUTES: SMS MESSAGING
+# ROUTES: TELEGRAM MESSAGING
 # =============================================================================
 
 @app.route('/api/messaging/send', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_send():
-    """Send a free-form SMS to a driver"""
+    """Send a free-form message to a driver via Telegram"""
     if request.method == 'OPTIONS':
         return '', 204
+
     try:
         token = extract_token_from_request()
-        if not token:
+        if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-        
+
         data = request.get_json()
-        if not data:
-            return create_response("error", "No JSON data provided", status_code=400)
-        
         driver_name = data.get('driverName', '')
         message = data.get('message', '')
-        phone = data.get('phone', '')
-        
-        if not driver_name:
-            return create_response("error", "driverName is required", status_code=400)
+        chat_id = data.get('chatId', '')
+
         if not message:
-            return create_response("error", "message is required", status_code=400)
-        if not phone:
-            return create_response("error", "phone is required", status_code=400)
-        
-        result = twilio_send_sms(phone, message)
-        
-        if result['success']:
+            return create_response("error", "Message is required", status_code=400)
+        if not chat_id:
+            return create_response("error", "Driver chat ID is required. Driver must first message the bot on Telegram.", status_code=400)
+
+        result = telegram_send_message(chat_id, message, parse_mode=None)
+
+        if result.get('success'):
             return create_response("success", "Message sent", data={
                 "success": True,
-                "message_id": result.get('message_sid'),
-                "phone": result.get('to'),
+                "message_id": result.get('message_id'),
+                "chat_id": chat_id,
                 "driver": driver_name,
-                "sent_at": datetime.now().isoformat()
+                "sent_at": datetime.now().isoformat(),
             })
         else:
-            return create_response("error", result.get('error', 'Failed to send'), 
+            return create_response("error", result.get('error', 'Failed to send'),
                                    data={"success": False, "error": result.get('error')}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging send error: {e}", exc_info=True)
@@ -2090,59 +2074,46 @@ def messaging_send():
 @app.route('/api/messaging/send-route', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_send_route():
-    """Send a route confirmation SMS to a driver"""
+    """Send a route confirmation to a driver via Telegram"""
     if request.method == 'OPTIONS':
         return '', 204
+
     try:
         token = extract_token_from_request()
-        if not token:
+        if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-        
+
         data = request.get_json()
-        if not data:
-            return create_response("error", "No JSON data provided", status_code=400)
-        
         driver_name = data.get('driverName', '')
-        phone = data.get('phone', '')
         route_summary = data.get('routeSummary', '')
         route_link = data.get('routeLink')
         pickup_info = data.get('pickupInfo')
         delivery_info = data.get('deliveryInfo')
         estimated_miles = data.get('estimatedMiles')
         notes = data.get('notes')
-        
-        if not driver_name:
-            return create_response("error", "driverName is required", status_code=400)
+        chat_id = data.get('chatId', '')
+
         if not route_summary:
-            return create_response("error", "routeSummary is required", status_code=400)
-        if not phone:
-            return create_response("error", "phone is required", status_code=400)
-        
-        message = build_route_message(
-            route_summary=route_summary,
-            route_link=route_link,
-            pickup_info=pickup_info,
-            delivery_info=delivery_info,
-            estimated_miles=estimated_miles,
-            notes=notes
-        )
-        
-        result = twilio_send_sms(phone, message)
-        
-        if result['success']:
+            return create_response("error", "Route summary is required", status_code=400)
+        if not chat_id:
+            return create_response("error", "Driver chat ID is required. Driver must first message the bot on Telegram.", status_code=400)
+
+        message = build_route_message(route_summary, route_link, pickup_info,
+                                      delivery_info, estimated_miles, notes)
+
+        result = telegram_send_message(chat_id, message)
+
+        if result.get('success'):
             return create_response("success", "Route sent to driver", data={
                 "success": True,
-                "message_id": result.get('message_sid'),
-                "phone": result.get('to'),
+                "message_id": result.get('message_id'),
+                "chat_id": chat_id,
                 "driver": driver_name,
                 "sent_at": datetime.now().isoformat(),
-                "route_summary": route_summary
+                "route_summary": route_summary,
             })
         else:
-            return create_response("error", result.get('error', 'Failed to send'), 
+            return create_response("error", result.get('error', 'Failed to send'),
                                    data={"success": False, "error": result.get('error')}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging send-route error: {e}", exc_info=True)
@@ -2152,129 +2123,99 @@ def messaging_send_route():
 @app.route('/api/messaging/check-reply', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_check_reply():
-    """Check for driver's SMS reply"""
+    """Check for driver reply via Telegram"""
     if request.method == 'OPTIONS':
         return '', 204
+
     try:
         token = extract_token_from_request()
-        if not token:
+        if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-        
+
         data = request.get_json()
-        if not data:
-            return create_response("error", "No JSON data provided", status_code=400)
-        
         driver_name = data.get('driverName', '')
-        phone = data.get('phone', '')
         since = data.get('since')
-        
-        if not driver_name:
-            return create_response("error", "driverName is required", status_code=400)
-        if not phone:
-            return create_response("error", "phone is required", status_code=400)
-        
-        result = twilio_check_replies(phone, since)
-        
-        if not result['success']:
-            return create_response("error", result.get('error', 'Failed to check replies'),
-                                   data={"status": "error", "driver": driver_name, "error": result.get('error')},
-                                   status_code=500)
-        
-        replies = result.get('replies', [])
-        
-        if not replies:
-            return create_response("success", "No reply yet", data={
-                "status": "pending",
-                "replies": [],
-                "driver": driver_name
+        chat_id = data.get('chatId', '')
+
+        if not chat_id:
+            return create_response("error", "Driver chat ID required", status_code=400)
+
+        result = telegram_check_replies(chat_id, since)
+
+        if result.get('success'):
+            return create_response("success", result.get('status', 'pending'), data={
+                "status": result.get('status', 'pending'),
+                "replies": result.get('replies', []),
+                "latest_reply": result.get('latest_reply'),
+                "driver": driver_name,
             })
-        
-        # Parse the latest reply
-        latest = replies[0]
-        reply_status = parse_driver_reply(latest.get('body', ''))
-        
-        return create_response("success", "Reply found", data={
-            "status": reply_status,
-            "replies": replies,
-            "latest_reply": latest,
-            "driver": driver_name
-        })
+        else:
+            return create_response("error", result.get('error', 'Failed to check'),
+                                   data={"status": "error", "error": result.get('error')}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging check-reply error: {e}", exc_info=True)
-        return create_response("error", "Failed to check reply", status_code=500)
+        return create_response("error", "Failed to check replies", status_code=500)
 
 
 @app.route('/api/messaging/test', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_test():
-    """Test Twilio connection"""
+    """Test Telegram bot connection"""
     if request.method == 'OPTIONS':
         return '', 204
+
     try:
         token = extract_token_from_request()
-        if not token:
+        if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-        
-        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
-            return create_response("error", "Twilio not configured", 
-                                   data={"success": False, "message": "Missing Twilio credentials"}, status_code=500)
-        
-        # Verify credentials by fetching account info
-        try:
-            url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}.json'
-            response = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=10)
-            
-            if response.status_code == 200:
-                return create_response("success", "Twilio connection OK", data={
-                    "success": True,
-                    "message": "Twilio is configured and connected",
-                    "phone_number": TWILIO_PHONE_NUMBER
-                })
-            else:
-                return create_response("error", "Twilio credentials invalid",
-                                       data={"success": False, "message": "Invalid Twilio credentials"}, status_code=500)
-        except Exception as e:
-            return create_response("error", f"Twilio connection failed: {str(e)}",
-                                   data={"success": False}, status_code=500)
+
+        if not TELEGRAM_BOT_TOKEN:
+            return create_response("error", "Telegram bot token not configured", status_code=500)
+
+        url = f'{TELEGRAM_API}/getMe'
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if data.get('ok'):
+            bot_info = data.get('result', {})
+            return create_response("success", "Telegram bot connected", data={
+                "success": True,
+                "bot_name": bot_info.get('first_name'),
+                "bot_username": bot_info.get('username'),
+            })
+        else:
+            return create_response("error", data.get('description', 'Failed to connect'), status_code=500)
     except Exception as e:
         logger.error(f"Messaging test error: {e}", exc_info=True)
-        return create_response("error", "Test failed", status_code=500)
+        return create_response("error", "Failed to test connection", status_code=500)
 
 
 @app.route('/api/messaging/test-message', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_test_message():
-    """Send a test SMS"""
+    """Send a test message to a specific Telegram chat_id"""
     if request.method == 'OPTIONS':
         return '', 204
+
     try:
         token = extract_token_from_request()
-        if not token:
+        if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
-        email = verify_token(token)
-        if not email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-        
+
         data = request.get_json()
-        phone = data.get('phone', '') if data else ''
-        
-        if not phone:
-            return create_response("error", "phone is required", status_code=400)
-        
-        result = twilio_send_sms(phone, "Test message from MilesOn. If you received this, SMS is working!")
-        
-        if result['success']:
+        chat_id = data.get('chatId', '')
+
+        if not chat_id:
+            return create_response("error", "chatId is required", status_code=400)
+
+        result = telegram_send_message(chat_id, "\u2705 Test message from MilesOn. If you see this, Telegram messaging is working!")
+
+        if result.get('success'):
             return create_response("success", "Test message sent", data={
                 "success": True,
-                "message_id": result.get('message_sid'),
-                "phone": result.get('to'),
-                "sent_at": datetime.now().isoformat()
+                "message_id": result.get('message_id'),
+                "chat_id": chat_id,
+                "sent_at": datetime.now().isoformat(),
             })
         else:
             return create_response("error", result.get('error', 'Failed to send'),
@@ -2282,6 +2223,34 @@ def messaging_test_message():
     except Exception as e:
         logger.error(f"Messaging test-message error: {e}", exc_info=True)
         return create_response("error", "Failed to send test", status_code=500)
+
+
+@app.route('/api/messaging/bot-info', methods=['GET', 'OPTIONS'])
+@cross_origin()
+def messaging_bot_info():
+    """Get bot username so drivers know who to message"""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        if not TELEGRAM_BOT_TOKEN:
+            return create_response("error", "Telegram not configured", status_code=500)
+
+        url = f'{TELEGRAM_API}/getMe'
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if data.get('ok'):
+            bot = data.get('result', {})
+            return create_response("success", "Bot info", data={
+                "bot_username": bot.get('username'),
+                "bot_name": bot.get('first_name'),
+                "bot_link": f"https://t.me/{bot.get('username')}",
+            })
+        else:
+            return create_response("error", "Failed to get bot info", status_code=500)
+    except Exception as e:
+        return create_response("error", str(e), status_code=500)
 
 
 # =============================================================================
@@ -2343,7 +2312,7 @@ if __name__ == '__main__':
     logger.info(f"Port: {port}")
     logger.info(f"First purchase bonus: +{FIRST_PURCHASE_BONUS_CREDITS} credits")
     logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
-    logger.info(f"Twilio configured: {bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER)}")
+    logger.info(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN)}")
     logger.info(f"Stablecoin merchant: {bool(STABLECOIN_MERCHANT_ADDRESS)}")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
