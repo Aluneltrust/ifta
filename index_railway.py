@@ -1918,15 +1918,24 @@ def build_route_message(route_summary, route_link=None, pickup_info=None,
     return "\n".join(lines)
 
 
-def telegram_send_message(chat_id, message, parse_mode='Markdown'):
+def _get_bot_api(bot_token=None):
+    """Get the Telegram API base URL for a given bot token (or default)"""
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    if not token:
+        return None
+    return f'https://api.telegram.org/bot{token}'
+
+
+def telegram_send_message(chat_id, message, parse_mode='Markdown', bot_token=None):
     """Send a message via Telegram Bot API"""
-    if not TELEGRAM_BOT_TOKEN:
+    api_url = _get_bot_api(bot_token)
+    if not api_url:
         return {'success': False, 'error': 'Telegram bot token not configured'}
     if not chat_id:
         return {'success': False, 'error': 'No chat_id provided'}
 
     try:
-        url = f'{TELEGRAM_API}/sendMessage'
+        url = f'{api_url}/sendMessage'
         response = requests.post(url, json={
             'chat_id': chat_id,
             'text': message,
@@ -1953,13 +1962,14 @@ def telegram_send_message(chat_id, message, parse_mode='Markdown'):
         return {'success': False, 'error': str(e)}
 
 
-def telegram_get_updates(offset=None, timeout=0):
+def telegram_get_updates(offset=None, timeout=0, bot_token=None):
     """Get recent messages sent to the bot"""
-    if not TELEGRAM_BOT_TOKEN:
+    api_url = _get_bot_api(bot_token)
+    if not api_url:
         return {'success': False, 'error': 'Telegram bot token not configured'}
 
     try:
-        url = f'{TELEGRAM_API}/getUpdates'
+        url = f'{api_url}/getUpdates'
         params = {'timeout': timeout}
         if offset:
             params['offset'] = offset
@@ -1977,9 +1987,9 @@ def telegram_get_updates(offset=None, timeout=0):
         return {'success': False, 'error': str(e)}
 
 
-def telegram_check_replies(chat_id, since_timestamp=None):
+def telegram_check_replies(chat_id, since_timestamp=None, bot_token=None):
     """Check for replies from a specific chat_id since a given timestamp"""
-    result = telegram_get_updates()
+    result = telegram_get_updates(bot_token=bot_token)
     if not result.get('success'):
         return result
 
@@ -2060,13 +2070,14 @@ def messaging_send():
         driver_name = data.get('driverName', '')
         message = data.get('message', '')
         chat_id = data.get('chatId', '').strip()
+        bot_token = data.get('botToken', '').strip() or None
 
         if not message:
             return create_response("error", "Message is required", status_code=400)
         if not chat_id:
             return create_response("error", "Driver chat ID is required. Driver must first message the bot on Telegram.", status_code=400)
 
-        result = telegram_send_message(chat_id, message, parse_mode=None)
+        result = telegram_send_message(chat_id, message, parse_mode=None, bot_token=bot_token)
 
         if result.get('success'):
             return create_response("success", "Message sent", data={
@@ -2105,6 +2116,7 @@ def messaging_send_route():
         estimated_miles = data.get('estimatedMiles')
         notes = data.get('notes')
         chat_id = data.get('chatId', '').strip()
+        bot_token = data.get('botToken', '').strip() or None
 
         if not route_summary:
             return create_response("error", "Route summary is required", status_code=400)
@@ -2114,7 +2126,7 @@ def messaging_send_route():
         message = build_route_message(route_summary, route_link, pickup_info,
                                       delivery_info, estimated_miles, notes)
 
-        result = telegram_send_message(chat_id, message)
+        result = telegram_send_message(chat_id, message, bot_token=bot_token)
 
         if result.get('success'):
             return create_response("success", "Route sent to driver", data={
@@ -2149,11 +2161,12 @@ def messaging_check_reply():
         driver_name = data.get('driverName', '')
         since = data.get('since')
         chat_id = data.get('chatId', '').strip()
+        bot_token = data.get('botToken', '').strip() or None
 
         if not chat_id:
             return create_response("error", "Driver chat ID required", status_code=400)
 
-        result = telegram_check_replies(chat_id, since)
+        result = telegram_check_replies(chat_id, since, bot_token=bot_token)
 
         if result.get('success'):
             return create_response("success", result.get('status', 'pending'), data={
@@ -2182,22 +2195,26 @@ def messaging_test():
         if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
 
-        if not TELEGRAM_BOT_TOKEN:
+        data = request.get_json() or {}
+        bot_token = data.get('botToken', '').strip() or None
+        api_url = _get_bot_api(bot_token)
+
+        if not api_url:
             return create_response("error", "Telegram bot token not configured", status_code=500)
 
-        url = f'{TELEGRAM_API}/getMe'
+        url = f'{api_url}/getMe'
         response = requests.get(url, timeout=10)
-        data = response.json()
+        resp_data = response.json()
 
-        if data.get('ok'):
-            bot_info = data.get('result', {})
+        if resp_data.get('ok'):
+            bot_info = resp_data.get('result', {})
             return create_response("success", "Telegram bot connected", data={
                 "success": True,
                 "bot_name": bot_info.get('first_name'),
                 "bot_username": bot_info.get('username'),
             })
         else:
-            return create_response("error", data.get('description', 'Failed to connect'), status_code=500)
+            return create_response("error", resp_data.get('description', 'Failed to connect'), status_code=500)
     except Exception as e:
         logger.error(f"Messaging test error: {e}", exc_info=True)
         return create_response("error", "Failed to test connection", status_code=500)
@@ -2217,11 +2234,12 @@ def messaging_test_message():
 
         data = request.get_json()
         chat_id = data.get('chatId', '').strip()
+        bot_token = data.get('botToken', '').strip() or None
 
         if not chat_id:
             return create_response("error", "chatId is required", status_code=400)
 
-        result = telegram_send_message(chat_id, "\u2705 Test message from MilesOn. If you see this, Telegram messaging is working!")
+        result = telegram_send_message(chat_id, "\u2705 Test message from MilesOn. If you see this, Telegram messaging is working!", bot_token=bot_token)
 
         if result.get('success'):
             return create_response("success", "Test message sent", data={
@@ -2238,7 +2256,7 @@ def messaging_test_message():
         return create_response("error", "Failed to send test", status_code=500)
 
 
-@app.route('/api/messaging/bot-info', methods=['GET', 'OPTIONS'])
+@app.route('/api/messaging/bot-info', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_bot_info():
     """Get bot username so drivers know who to message"""
@@ -2246,15 +2264,19 @@ def messaging_bot_info():
         return '', 204
 
     try:
-        if not TELEGRAM_BOT_TOKEN:
+        data = request.get_json() or {}
+        bot_token = data.get('botToken', '').strip() or None
+        api_url = _get_bot_api(bot_token)
+
+        if not api_url:
             return create_response("error", "Telegram not configured", status_code=500)
 
-        url = f'{TELEGRAM_API}/getMe'
+        url = f'{api_url}/getMe'
         response = requests.get(url, timeout=10)
-        data = response.json()
+        resp_data = response.json()
 
-        if data.get('ok'):
-            bot = data.get('result', {})
+        if resp_data.get('ok'):
+            bot = resp_data.get('result', {})
             return create_response("success", "Bot info", data={
                 "bot_username": bot.get('username'),
                 "bot_name": bot.get('first_name'),
@@ -2278,14 +2300,17 @@ def messaging_bot_users():
         if not token or not verify_token(token):
             return create_response("error", "Authentication required", status_code=401)
 
-        if not TELEGRAM_BOT_TOKEN:
+        data = request.get_json() or {}
+        bot_token = data.get('botToken', '').strip() or None
+
+        api_url = _get_bot_api(bot_token)
+        if not api_url:
             return create_response("error", "Telegram not configured", status_code=500)
 
-        result = telegram_get_updates()
+        result = telegram_get_updates(bot_token=bot_token)
         if not result.get('success'):
             return create_response("error", result.get('error', 'Failed to get updates'), status_code=500)
 
-        # Collect unique users from all updates
         users = {}
         for update in result.get('updates', []):
             msg = update.get('message', {})
@@ -2303,7 +2328,6 @@ def messaging_bot_users():
                     'lastMessageAt': datetime.fromtimestamp(msg.get('date', 0)).isoformat(),
                 }
             elif chat_id in users:
-                # Update with latest message
                 msg_date = msg.get('date', 0)
                 existing_date = datetime.fromisoformat(users[chat_id]['lastMessageAt']).timestamp()
                 if msg_date > existing_date:
