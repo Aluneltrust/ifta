@@ -1974,7 +1974,7 @@ def _call_ollama_route(stops):
     
     payload = json.dumps({
         "model": OLLAMA_MODEL,
-        "prompt": _build_route_prompt(stops),
+        "messages": [{"role": "user", "content": _build_route_prompt(stops)}],
         "stream": False,
         "options": {"temperature": 0.1, "num_predict": 1024}
     }).encode('utf-8')
@@ -1989,7 +1989,7 @@ def _call_ollama_route(stops):
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode('utf-8'))
         
-        text = result.get('response', '')
+        text = result.get('message', {}).get('content', '')
         logger.info(f"[RouteOptimizer] Ollama response: {text[:300]}")
         return _parse_ai_route_response(text, stops)
         
