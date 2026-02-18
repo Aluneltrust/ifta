@@ -1857,29 +1857,55 @@ def _build_route_prompt(stops):
         load_num = (i // 2) + 1
         pairs.append(f"Load {load_num}: Pickup at {stops[i]} -> Deliver to {stops[i+1]}")
     
-    return f"""You are a trucking route optimizer. Given these loads, return the optimal driving order.
+    # List all unique stops explicitly so the model knows exactly what to return
+    unique_stops = list(dict.fromkeys(stops))  # preserve order, remove dupes
+    stops_list = ', '.join(f'"{s}"' for s in unique_stops)
+    
+    return f"""Optimize this trucking route. Return the stops in optimal driving order as a JSON array.
 
 LOADS:
 {chr(10).join(pairs)}
 
-RULES:
-- Each load's pickup MUST come before its delivery
-- Driver starts at Load 1's pickup
-- If multiple pickups are near each other geographically, batch them before delivering
-- Minimize total driving distance - no zigzagging across the country
-- If two consecutive stops are the same city, include it only once
+AVAILABLE STOPS (use EXACTLY these names, do NOT rename or add any):
+{stops_list}
 
-Return ONLY a JSON array of stop names in optimal driving order.
-Use the EXACT city names from the loads. No explanation, just the JSON array.
-Example: ["Spokane, WA", "Houston, TX", "Bryan, TX", "Salem, OR"]"""
+RULES:
+- Each load's pickup MUST come before its delivery in the result
+- Minimize total driving distance
+- If two pickups are geographically close, batch them together
+- Remove consecutive duplicate cities
+- Do NOT add stops that are not in the list above
+- Do NOT rename any stops
+
+Return ONLY a JSON array. No explanation, no markdown, no code fences.
+Example output: ["City1, ST", "City2, ST", "City3, ST"]"""
+
+
+def _normalize_stop_name(name):
+    """Normalize a stop name for fuzzy matching."""
+    import re as _re
+    name = name.lower().strip()
+    # Remove punctuation like apostrophes, periods
+    name = _re.sub(r"[''`.()]", '', name)
+    # Normalize common abbreviations
+    name = _re.sub(r'\bft\b', 'fort', name)
+    name = _re.sub(r'\bst\b', 'saint', name)
+    name = _re.sub(r'\bmt\b', 'mount', name)
+    name = _re.sub(r'\bcda\b', 'coeur d alene', name)
+    name = _re.sub(r'\bcoeur dalene\b', 'coeur d alene', name)
+    # Collapse whitespace
+    name = _re.sub(r'\s+', ' ', name)
+    return name
 
 
 def _parse_ai_route_response(text, original):
     """Parse AI response into stop list with validation."""
     import re as _re
     text = text.strip()
+    # Strip markdown code fences
     text = _re.sub(r'^```(?:json)?\s*', '', text)
     text = _re.sub(r'\s*```$', '', text)
+    # Strip any leading text before the array
     text = text.strip()
     
     match = _re.search(r'\[.*\]', text, _re.DOTALL)
@@ -1895,16 +1921,38 @@ def _parse_ai_route_response(text, original):
     if not isinstance(result, list) or len(result) < 2:
         return original
     
-    # Validate: at least 70% of unique original stops present
-    orig_set = set(s.lower().strip() for s in original)
-    result_set = set(s.lower().strip() for s in result)
-    matched = sum(1 for s in orig_set if s in result_set)
+    # Build normalized lookup from original stops
+    orig_normalized = {_normalize_stop_name(s): s for s in original}
+    unique_orig = set(orig_normalized.keys())
     
-    if matched < len(orig_set) * 0.7:
-        logger.warning(f"[RouteOptimizer] AI dropped too many stops ({matched}/{len(orig_set)})")
+    # Map AI results back to original stop names (handles renaming like Cda -> Coeur d'Alene)
+    mapped_result = []
+    matched_originals = set()
+    for ai_stop in result:
+        norm = _normalize_stop_name(ai_stop)
+        if norm in orig_normalized:
+            mapped_result.append(orig_normalized[norm])
+            matched_originals.add(norm)
+        else:
+            # Try partial match (city name without state)
+            ai_city = norm.split(',')[0].strip() if ',' in norm else norm
+            for orig_norm, orig_name in orig_normalized.items():
+                orig_city = orig_norm.split(',')[0].strip()
+                if ai_city == orig_city and orig_norm not in matched_originals:
+                    mapped_result.append(orig_name)
+                    matched_originals.add(orig_norm)
+                    break
+            else:
+                # Skip stops the AI hallucinated
+                logger.info(f"[RouteOptimizer] Skipping unknown stop from AI: {ai_stop}")
+    
+    # Check coverage
+    unique_original_count = len(set(_normalize_stop_name(s) for s in original))
+    if len(matched_originals) < unique_original_count * 0.7:
+        logger.warning(f"[RouteOptimizer] AI dropped too many stops ({len(matched_originals)}/{unique_original_count})")
         return original
     
-    return result
+    return mapped_result
 
 
 def _ollama_available():
