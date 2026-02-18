@@ -2266,6 +2266,59 @@ def messaging_bot_info():
         return create_response("error", str(e), status_code=500)
 
 
+@app.route('/api/messaging/bot-users', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def messaging_bot_users():
+    """List all unique users who have messaged the bot (for driver onboarding)"""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        token = extract_token_from_request()
+        if not token or not verify_token(token):
+            return create_response("error", "Authentication required", status_code=401)
+
+        if not TELEGRAM_BOT_TOKEN:
+            return create_response("error", "Telegram not configured", status_code=500)
+
+        result = telegram_get_updates()
+        if not result.get('success'):
+            return create_response("error", result.get('error', 'Failed to get updates'), status_code=500)
+
+        # Collect unique users from all updates
+        users = {}
+        for update in result.get('updates', []):
+            msg = update.get('message', {})
+            user = msg.get('from', {})
+            chat = msg.get('chat', {})
+            chat_id = str(chat.get('id', ''))
+
+            if chat_id and chat_id not in users:
+                users[chat_id] = {
+                    'chatId': chat_id,
+                    'firstName': user.get('first_name', ''),
+                    'lastName': user.get('last_name', ''),
+                    'username': user.get('username', ''),
+                    'lastMessage': msg.get('text', ''),
+                    'lastMessageAt': datetime.fromtimestamp(msg.get('date', 0)).isoformat(),
+                }
+            elif chat_id in users:
+                # Update with latest message
+                msg_date = msg.get('date', 0)
+                existing_date = datetime.fromisoformat(users[chat_id]['lastMessageAt']).timestamp()
+                if msg_date > existing_date:
+                    users[chat_id]['lastMessage'] = msg.get('text', '')
+                    users[chat_id]['lastMessageAt'] = datetime.fromtimestamp(msg_date).isoformat()
+
+        return create_response("success", f"{len(users)} users found", data={
+            "users": list(users.values()),
+        })
+
+    except Exception as e:
+        logger.error(f"Bot users error: {e}", exc_info=True)
+        return create_response("error", str(e), status_code=500)
+
+
 # =============================================================================
 # ROUTES: DEBUG
 # =============================================================================
