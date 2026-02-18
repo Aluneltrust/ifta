@@ -1,24 +1,18 @@
 FROM python:3.11-slim
 
-# Install dependencies (zstd required by Ollama installer)
 RUN apt-get update && apt-get install -y curl procps zstd && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
 
-# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app
 COPY index_railway.py .
 
-# Pull model at build time (baked into the image — no download at runtime)
 RUN ollama serve & sleep 5 && ollama pull llama3.2:1b && pkill ollama
 
-# Start script
 COPY start.sh .
-RUN chmod +x start.sh
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
 EXPOSE ${PORT:-5000}
 
