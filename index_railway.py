@@ -1868,18 +1868,16 @@ LOADS:
 AVAILABLE STOPS (use EXACTLY these names):
 {stops_list}
 
+CRITICAL RULES:
+1. Each load's pickup MUST come before its delivery
+2. Group geographically close stops together - do NOT jump back and forth between regions
+3. Complete all stops in one region before traveling to the next region
+4. Texas cities must be grouped together, Washington/Idaho cities must be grouped together
+5. Remove consecutive duplicate cities
+6. Do NOT add or rename any stops
 
-RULES:
-- Each load's pickup MUST come before its delivery in the result
-- Minimize total driving distance
-- If two pickups are geographically close, batch them together
-- Remove consecutive duplicate cities
-- Do NOT add stops that are not in the list above
-- Do NOT rename any stops
-
-Return ONLY a JSON array. No explanation, no markdown, no code fences.
-Example output: ["City1, ST", "City2, ST", "City3, ST"]"""
-
+Return ONLY a JSON array, nothing else.
+Example: ["City1, ST", "City2, ST", "City3, ST"]"""
 
 def _normalize_stop_name(name):
     """Normalize a stop name for fuzzy matching."""
