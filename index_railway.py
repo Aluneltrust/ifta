@@ -1848,7 +1848,7 @@ def messaging_test_message():
 
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
-OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3.2:1b')
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3.2:3b')
 
 def _build_route_prompt(stops):
     """Build optimization prompt from flat address list."""
