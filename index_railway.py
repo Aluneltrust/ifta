@@ -57,13 +57,14 @@ def after_request(response):
     response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
 
+from routes.ifta.route_optimizer import route_optimizer_bp
+app.register_blueprint(route_optimizer_bp, url_prefix='/api/route')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-
 # =============================================================================
 # CONSTANTS
 # =============================================================================
