@@ -2059,7 +2059,7 @@ def messaging_send():
         data = request.get_json()
         driver_name = data.get('driverName', '')
         message = data.get('message', '')
-        chat_id = data.get('chatId', '')
+        chat_id = data.get('chatId', '').strip()
 
         if not message:
             return create_response("error", "Message is required", status_code=400)
@@ -2104,7 +2104,7 @@ def messaging_send_route():
         delivery_info = data.get('deliveryInfo')
         estimated_miles = data.get('estimatedMiles')
         notes = data.get('notes')
-        chat_id = data.get('chatId', '')
+        chat_id = data.get('chatId', '').strip()
 
         if not route_summary:
             return create_response("error", "Route summary is required", status_code=400)
@@ -2148,7 +2148,7 @@ def messaging_check_reply():
         data = request.get_json()
         driver_name = data.get('driverName', '')
         since = data.get('since')
-        chat_id = data.get('chatId', '')
+        chat_id = data.get('chatId', '').strip()
 
         if not chat_id:
             return create_response("error", "Driver chat ID required", status_code=400)
@@ -2216,7 +2216,7 @@ def messaging_test_message():
             return create_response("error", "Authentication required", status_code=401)
 
         data = request.get_json()
-        chat_id = data.get('chatId', '')
+        chat_id = data.get('chatId', '').strip()
 
         if not chat_id:
             return create_response("error", "chatId is required", status_code=400)
