@@ -1857,17 +1857,17 @@ def _build_route_prompt(stops):
         load_num = (i // 2) + 1
         pairs.append(f"Load {load_num}: Pickup at {stops[i]} -> Deliver to {stops[i+1]}")
     
-    # List all unique stops explicitly so the model knows exactly what to return
-    unique_stops = list(dict.fromkeys(stops))  # preserve order, remove dupes
+    unique_stops = list(dict.fromkeys(stops))
     stops_list = ', '.join(f'"{s}"' for s in unique_stops)
     
-    return f"""Optimize this trucking route. Return the stops in optimal driving order as a JSON array.
+    return f"""You are a truck dispatcher. Sort these stops into the shortest driving route.
 
 LOADS:
 {chr(10).join(pairs)}
 
-AVAILABLE STOPS (use EXACTLY these names, do NOT rename or add any):
+AVAILABLE STOPS (use EXACTLY these names):
 {stops_list}
+
 
 RULES:
 - Each load's pickup MUST come before its delivery in the result
