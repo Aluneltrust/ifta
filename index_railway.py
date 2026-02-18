@@ -57,14 +57,13 @@ def after_request(response):
     response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
 
-from routes.ifta.route_optimizer import route_optimizer_bp
-app.register_blueprint(route_optimizer_bp, url_prefix='/api/route')
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -83,8 +82,10 @@ SQUARE_ENVIRONMENT = os.environ.get('SQUARE_ENVIRONMENT', 'sandbox')
 
 SQUARE_API_URL = 'https://connect.squareupsandbox.com' if SQUARE_ENVIRONMENT == 'sandbox' else 'https://connect.squareup.com'
 
-# Telegram Bot Configuration
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+# Twilio SMS Configuration
+TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER')
 
 
 # =============================================================================
@@ -831,10 +832,9 @@ def health_check():
         message="Railway User Management API",
         data={
             "version": "3.1.0",
-            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "telegram_messaging", "stablecoin_payments"],
+            "features": ["auth", "credits", "first_purchase_bonus", "square_payments", "sms_messaging"],
             "square_configured": bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID),
-            "telegram_configured": bool(TELEGRAM_BOT_TOKEN),
-            "stablecoin_merchant": bool(os.environ.get('STABLECOIN_MERCHANT_ADDRESS')),
+            "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER),
             "first_purchase_bonus": {
                 "bonus_credits": FIRST_PURCHASE_BONUS_CREDITS,
                 "description": f"+{FIRST_PURCHASE_BONUS_CREDITS} bonus credits on first purchase"
@@ -1430,469 +1430,34 @@ def verify_payment():
 
 
 # =============================================================================
-# STABLECOIN CHAINS CONFIG (for on-chain verification)
+# TWILIO SMS HELPERS
 # =============================================================================
 
-STABLECOIN_CHAINS = {
-    1: {
-        'name': 'Ethereum', 'rpc': 'https://eth.llamarpc.com', 'explorer': 'https://etherscan.io',
-        'tokens': {
-            'USDC': {'addr': '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 'dec': 6},
-            'USDT': {'addr': '0xdAC17F958D2ee523a2206206994597C13D831ec7', 'dec': 6},
-        }
-    },
-    8453: {
-        'name': 'Base', 'rpc': 'https://mainnet.base.org', 'explorer': 'https://basescan.org',
-        'tokens': {
-            'USDC': {'addr': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', 'dec': 6},
-        }
-    },
-    137: {
-        'name': 'Polygon', 'rpc': 'https://polygon-rpc.com', 'explorer': 'https://polygonscan.com',
-        'tokens': {
-            'USDC': {'addr': '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', 'dec': 6},
-            'USDT': {'addr': '0xc2132D05D31c914a87C6611C10748AEb04B58e8F', 'dec': 6},
-        }
-    },
-    42161: {
-        'name': 'Arbitrum One', 'rpc': 'https://arb1.arbitrum.io/rpc', 'explorer': 'https://arbiscan.io',
-        'tokens': {
-            'USDC': {'addr': '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', 'dec': 6},
-            'USDT': {'addr': '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9', 'dec': 6},
-        }
-    },
-    10: {
-        'name': 'Optimism', 'rpc': 'https://mainnet.optimism.io', 'explorer': 'https://optimistic.etherscan.io',
-        'tokens': {
-            'USDC': {'addr': '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', 'dec': 6},
-            'USDT': {'addr': '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58', 'dec': 6},
-        }
-    },
-    43114: {
-        'name': 'Avalanche', 'rpc': 'https://api.avax.network/ext/bc/C/rpc', 'explorer': 'https://snowtrace.io',
-        'tokens': {
-            'USDC': {'addr': '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', 'dec': 6},
-            'USDT': {'addr': '0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7', 'dec': 6},
-        }
-    },
-    56: {
-        'name': 'BNB Chain', 'rpc': 'https://bsc-dataseed.binance.org', 'explorer': 'https://bscscan.com',
-        'tokens': {
-            'USDC': {'addr': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', 'dec': 18},
-            'USDT': {'addr': '0x55d398326f99059fF775485246999027B3197955', 'dec': 18},
-        }
-    },
-}
-
-STABLECOIN_MERCHANT_ADDRESS = os.environ.get('STABLECOIN_MERCHANT_ADDRESS', '')
-
-
-# =============================================================================
-# STABLECOIN ON-CHAIN VERIFICATION
-# =============================================================================
-
-def verify_stablecoin_tx_onchain(tx_hash, chain_id, expected_token, expected_amount_usd):
-    """Verify a stablecoin transaction on-chain via RPC"""
-    chain = STABLECOIN_CHAINS.get(chain_id)
-    if not chain:
-        return False, f"Unsupported chain ID: {chain_id}"
-
-    try:
-        # Fetch transaction receipt
-        resp = requests.post(chain['rpc'], json={
-            'jsonrpc': '2.0', 'id': 1,
-            'method': 'eth_getTransactionByHash',
-            'params': [tx_hash]
-        }, timeout=15)
-        data = resp.json()
-        tx = data.get('result')
-
-        if not tx:
-            return False, "Transaction not found (may not be mined yet)"
-
-        # Verify the tx was sent to a known stablecoin contract on this chain
-        tx_to = tx.get('to', '').lower()
-        known_addrs = {v['addr'].lower(): k for k, v in chain['tokens'].items()}
-
-        if tx_to not in known_addrs:
-            return False, f"Transaction target {tx_to} is not a known stablecoin contract"
-
-        # Basic check passed — tx was sent to a stablecoin contract
-        logger.info(f"Stablecoin tx verified: {tx_hash} on {chain['name']} to {known_addrs[tx_to]}")
-        return True, None
-
-    except requests.exceptions.Timeout:
-        return False, "RPC timeout"
-    except Exception as e:
-        logger.error(f"Stablecoin verification error: {e}")
-        return False, str(e)
-
-
-# =============================================================================
-# ROUTES: STABLECOIN PAYMENT PAGE (served in browser for MetaMask)
-# =============================================================================
-
-@app.route('/pay/stablecoin', methods=['GET'])
-def stablecoin_pay_page():
-    """Serve the stablecoin payment page for browser-based MetaMask payments"""
-    token = request.args.get('token', '')
-    email = request.args.get('email', '')
-    amount = request.args.get('amount', '10')
-    credits_param = request.args.get('credits', amount)
-    bonus = request.args.get('bonus', '0')
-    crypto_bonus = request.args.get('cryptoBonus', '0')
-    total = request.args.get('total', credits_param)
-    is_first = request.args.get('first', '0')
-    merchant = request.args.get('merchant', STABLECOIN_MERCHANT_ADDRESS)
-
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MilesOn - Stablecoin Payment</title>
-<style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center}}
-.card{{background:#1e293b;border-radius:16px;padding:32px;max-width:420px;width:100%;box-shadow:0 25px 50px rgba(0,0,0,0.3)}}
-h1{{font-size:20px;text-align:center;margin-bottom:4px}}
-.subtitle{{text-align:center;color:#94a3b8;font-size:13px;margin-bottom:24px}}
-.step{{display:none}}.step.active{{display:flex;flex-direction:column;align-items:center;gap:12px}}
-.amount-box{{background:#0f172a;border-radius:12px;padding:16px;text-align:center;width:100%}}
-.amount-big{{font-size:32px;font-weight:700;color:#fff}}.amount-credits{{color:#059669;font-size:14px;font-weight:500}}
-.bonus-tag{{background:#065f46;color:#34d399;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:600}}
-.chain-list{{display:flex;flex-direction:column;gap:6px;width:100%;max-height:280px;overflow-y:auto}}
-.chain-btn{{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:#0f172a;border:1px solid #334155;border-radius:10px;cursor:pointer;color:#e2e8f0;font-size:14px;width:100%;text-align:left}}
-.chain-btn:hover{{border-color:#6366f1}}.chain-btn.disabled{{opacity:0.4;cursor:not-allowed}}
-.chain-name{{font-weight:500}}.chain-token{{color:#818cf8;font-size:12px;font-weight:600;background:#1e1b4b;padding:1px 6px;border-radius:4px;margin-left:6px}}
-.chain-bal{{font-family:monospace;font-size:13px;color:#94a3b8}}.chain-bal.enough{{color:#34d399}}
-.btn{{padding:12px 24px;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;width:100%;margin-top:4px}}
-.btn-metamask{{background:#f6851b;color:#fff}}.btn-metamask:hover{{background:#e2761b}}
-.btn-primary{{background:#6366f1;color:#fff}}.btn-primary:hover{{background:#4f46e5}}
-.btn-secondary{{background:#334155;color:#94a3b8}}.btn-secondary:hover{{background:#475569}}
-.btn:disabled{{opacity:0.6;cursor:not-allowed}}
-.btn-row{{display:flex;gap:8px;width:100%}}
-.btn-row .btn{{flex:1}}
-.review-card{{background:#0f172a;border-radius:10px;padding:16px;width:100%}}
-.review-row{{display:flex;justify-content:space-between;padding:4px 0;font-size:13px}}
-.review-label{{color:#94a3b8}}.review-value{{color:#e2e8f0;font-weight:500}}
-.review-divider{{height:1px;background:#334155;margin:6px 0}}
-.success-icon{{width:56px;height:56px;border-radius:50%;background:#065f46;display:flex;align-items:center;justify-content:center;font-size:28px}}
-.tx-box{{background:#0f172a;border-radius:8px;padding:10px 14px;width:100%;font-family:monospace;font-size:11px;color:#94a3b8;word-break:break-all}}
-.spinner{{width:40px;height:40px;border:3px solid #334155;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite}}
-@keyframes spin{{to{{transform:rotate(360deg)}}}}
-.error-text{{color:#f87171;font-size:13px;text-align:center}}
-.no-metamask{{text-align:center;color:#94a3b8;font-size:14px;line-height:1.6}}
-.no-metamask a{{color:#818cf8;text-decoration:none;font-weight:600}}
-.note{{font-size:12px;color:#64748b;text-align:center}}
-</style>
-</head>
-<body>
-<div class="card">
-<h1>MilesOn Credits</h1>
-<p class="subtitle">Pay with USDC or USDT via MetaMask</p>
-
-<div id="stepConnect" class="step active">
-  <div class="amount-box">
-    <div class="amount-big">${amount} USDC/USDT</div>
-    <div class="amount-credits">= {total} Credits{' <span class="bonus-tag">+' + crypto_bonus + ' crypto bonus (10%)</span>' if int(crypto_bonus) > 0 else ''}{' <span class="bonus-tag">+' + bonus + ' first purchase!</span>' if int(bonus) > 0 else ''}</div>
-  </div>
-  <div id="noMetamask" class="no-metamask" style="display:none">MetaMask not detected.<br/><a href="https://metamask.io/download/" target="_blank">Install MetaMask</a> and refresh this page.</div>
-  <div id="hasMetamask"><button class="btn btn-metamask" id="btnConnect" onclick="connectWallet()">&#129418; Connect MetaMask</button></div>
-</div>
-
-<div id="stepChains" class="step">
-  <div class="amount-box">
-    <div class="amount-big">${amount}</div>
-    <div class="amount-credits">{total} Credits</div>
-  </div>
-  <p class="note">Select network & stablecoin</p>
-  <div class="chain-list" id="chainList"></div>
-  <button class="btn btn-secondary" onclick="showStep('stepConnect')">Back</button>
-</div>
-
-<div id="stepReview" class="step">
-  <div class="review-card">
-    <div class="review-row"><span class="review-label">Network</span><span class="review-value" id="rvChain"></span></div>
-    <div class="review-row"><span class="review-label">Token</span><span class="review-value" id="rvToken"></span></div>
-    <div class="review-divider"></div>
-    <div class="review-row"><span class="review-label">Amount</span><span class="review-value" id="rvAmount"></span></div>
-    <div class="review-row"><span class="review-label">Credits</span><span class="review-value" id="rvCredits"></span></div>
-    <div class="review-row"><span class="review-label">To</span><span class="review-value" style="font-size:11px;font-family:monospace" id="rvMerchant"></span></div>
-  </div>
-  <div class="btn-row">
-    <button class="btn btn-secondary" onclick="showStep('stepChains')">Back</button>
-    <button class="btn btn-primary" onclick="sendPayment()">Confirm & Pay</button>
-  </div>
-</div>
-
-<div id="stepSending" class="step">
-  <div class="spinner"></div>
-  <p>Confirm in MetaMask...</p>
-  <p class="note">Do not close this page</p>
-</div>
-
-<div id="stepSuccess" class="step">
-  <div class="success-icon">&#10003;</div>
-  <h2 style="color:#34d399"><span id="successCredits"></span> Credits Added!</h2>
-  <div class="tx-box">
-    <div style="font-size:11px;color:#64748b;margin-bottom:4px">Transaction</div>
-    <span id="txHashDisplay"></span>
-    <a id="txExplorerLink" href="#" target="_blank" style="color:#818cf8;margin-left:6px;font-size:11px">View ↗</a>
-  </div>
-  <p class="note">You can close this page and return to MilesOn.</p>
-</div>
-
-<div id="stepError" class="step">
-  <p class="error-text" id="errorMsg">Payment failed</p>
-  <button class="btn btn-secondary" onclick="showStep('stepReview')">Try Again</button>
-</div>
-</div>
-
-<script>
-const API_BASE='{request.host_url.rstrip("/")}';
-const AUTH_TOKEN='{token}';
-const EMAIL='{email}';
-const AMOUNT={amount};
-const CREDITS={credits_param};
-const BONUS={bonus};
-const TOTAL_CREDITS={total};
-const IS_FIRST={'true' if is_first == '1' else 'false'};
-const MERCHANT_ADDR='{merchant}';
-
-const CHAINS={{8453:{{name:'Base',short:'Base',hex:'0x2105',rpc:'https://mainnet.base.org',explorer:'https://basescan.org',tokens:{{USDC:{{addr:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',dec:6}}}}}},137:{{name:'Polygon',short:'MATIC',hex:'0x89',rpc:'https://polygon-rpc.com',explorer:'https://polygonscan.com',tokens:{{USDC:{{addr:'0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',dec:6}},USDT:{{addr:'0xc2132D05D31c914a87C6611C10748AEb04B58e8F',dec:6}}}}}},42161:{{name:'Arbitrum One',short:'ARB',hex:'0xa4b1',rpc:'https://arb1.arbitrum.io/rpc',explorer:'https://arbiscan.io',tokens:{{USDC:{{addr:'0xaf88d065e77c8cC2239327C5EDb3A432268e5831',dec:6}},USDT:{{addr:'0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',dec:6}}}}}},10:{{name:'Optimism',short:'OP',hex:'0xa',rpc:'https://mainnet.optimism.io',explorer:'https://optimistic.etherscan.io',tokens:{{USDC:{{addr:'0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',dec:6}},USDT:{{addr:'0x94b008aA00579c1307B0EF2c499aD98a8ce58e58',dec:6}}}}}},43114:{{name:'Avalanche',short:'AVAX',hex:'0xa86a',rpc:'https://api.avax.network/ext/bc/C/rpc',explorer:'https://snowtrace.io',tokens:{{USDC:{{addr:'0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',dec:6}},USDT:{{addr:'0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7',dec:6}}}}}},56:{{name:'BNB Chain',short:'BSC',hex:'0x38',rpc:'https://bsc-dataseed.binance.org',explorer:'https://bscscan.com',tokens:{{USDC:{{addr:'0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',dec:18}},USDT:{{addr:'0x55d398326f99059fF775485246999027B3197955',dec:18}}}}}},1:{{name:'Ethereum',short:'ETH',hex:'0x1',rpc:'https://eth.llamarpc.com',explorer:'https://etherscan.io',tokens:{{USDC:{{addr:'0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',dec:6}},USDT:{{addr:'0xdAC17F958D2ee523a2206206994597C13D831ec7',dec:6}}}}}}}};
-const ORDER=[8453,137,42161,10,43114,56,1];
-const SEL={{balanceOf:'70a08231',transfer:'a9059cbb'}};
-let walletAddress='',selectedChainId=0,selectedToken='',chainBalances={{}};
-
-function showStep(id){{document.querySelectorAll('.step').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}}
-function encAddr(a){{return a.toLowerCase().replace('0x','').padStart(64,'0');}}
-function encU256(v){{return v.toString(16).padStart(64,'0');}}
-function parseAmt(a,d){{const[w,f='']=a.toString().split('.');return BigInt(w+f.padEnd(d,'0').slice(0,d));}}
-
-window.addEventListener('load',()=>{{if(!window.ethereum){{document.getElementById('noMetamask').style.display='block';document.getElementById('hasMetamask').style.display='none';}}}});
-
-async function connectWallet(){{
-  try{{
-    const accts=await window.ethereum.request({{method:'eth_requestAccounts'}});
-    walletAddress=accts[0];
-    await buildChainList();
-    showStep('stepChains');
-  }}catch(e){{
-    if(e.code!==4001)alert(e.message||'Failed to connect');
-  }}
-}}
-
-async function buildChainList(){{
-  const list=document.getElementById('chainList');
-  list.innerHTML='<p class="note">Loading balances...</p>';
-  chainBalances={{}};
-  const callData='0x'+SEL.balanceOf+encAddr(walletAddress);
-  const fetches=[];
-  for(const cid of ORDER){{
-    const ch=CHAINS[cid];
-    for(const[sym,tok] of Object.entries(ch.tokens)){{
-      fetches.push(fetch(ch.rpc,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{jsonrpc:'2.0',id:1,method:'eth_call',params:[{{to:tok.addr,data:callData}},'latest']}})}}
-      ).then(r=>r.json()).then(d=>{{
-        if(d.result&&d.result!=='0x'&&d.result!=='0x0'){{
-          const raw=BigInt(d.result);
-          const whole=raw/BigInt(10**tok.dec);
-          const frac=(raw%BigInt(10**tok.dec)).toString().padStart(tok.dec,'0').slice(0,2);
-          chainBalances[cid+'_'+sym]={{raw,display:whole+'.'+frac,enough:raw>=parseAmt(AMOUNT,tok.dec)}};
-        }}
-      }}).catch(()=>{{}}));
-    }}
-  }}
-  await Promise.all(fetches);
-  list.innerHTML='';
-  for(const cid of ORDER){{
-    const ch=CHAINS[cid];
-    for(const[sym,tok] of Object.entries(ch.tokens)){{
-      const key=cid+'_'+sym;
-      const bal=chainBalances[key];
-      const hasEnough=bal&&bal.enough;
-      const btn=document.createElement('button');
-      btn.className='chain-btn'+(bal&&!hasEnough?' disabled':'');
-      btn.innerHTML=`<span><span class="chain-name">${{ch.name}}</span><span class="chain-token">${{sym}}</span></span><span class="chain-bal${{hasEnough?' enough':''}}">${{bal?bal.display:'0.00'}}</span>`;
-      if(hasEnough)btn.onclick=()=>selectChain(cid,sym);
-      list.appendChild(btn);
-    }}
-  }}
-  if(list.children.length===0)list.innerHTML='<p class="note">No stablecoin balances found</p>';
-}}
-
-async function selectChain(cid,sym){{
-  selectedChainId=cid;selectedToken=sym;
-  const ch=CHAINS[cid];
-  const currentHex=await window.ethereum.request({{method:'eth_chainId'}});
-  if(parseInt(currentHex,16)!==cid){{
-    try{{await window.ethereum.request({{method:'wallet_switchEthereumChain',params:[{{chainId:ch.hex}}]}});}}
-    catch(e){{
-      if(e.code===4902){{try{{await window.ethereum.request({{method:'wallet_addEthereumChain',params:[{{chainId:ch.hex,chainName:ch.name,rpcUrls:[ch.rpc],blockExplorerUrls:[ch.explorer],nativeCurrency:ch.nc||{{name:'ETH',symbol:'ETH',decimals:18}}}}]}});}}catch(e2){{alert('Failed to add network');return;}}}}
-      else{{return;}}
-    }}
-  }}
-  document.getElementById('rvChain').textContent=ch.name;
-  document.getElementById('rvToken').textContent=sym;
-  document.getElementById('rvAmount').textContent=AMOUNT+' '+sym;
-  document.getElementById('rvCredits').textContent=TOTAL_CREDITS;
-  document.getElementById('rvMerchant').textContent=MERCHANT_ADDR.slice(0,6)+'...'+MERCHANT_ADDR.slice(-4);
-  showStep('stepReview');
-}}
-
-async function sendPayment(){{
-  showStep('stepSending');
-  const ch=CHAINS[selectedChainId],tok=ch.tokens[selectedToken];
-  const raw=parseAmt(AMOUNT,tok.dec);
-  const txData='0x'+SEL.transfer+encAddr(MERCHANT_ADDR)+encU256(raw);
-  let txHash;
-  try{{txHash=await window.ethereum.request({{method:'eth_sendTransaction',params:[{{from:walletAddress,to:tok.addr,data:txData}}]}});}}
-  catch(e){{if(e.code===4001){{showStep('stepReview');return;}}document.getElementById('errorMsg').textContent=e.message||'Transaction failed';showStep('stepError');return;}}
-
-  async function tryBackend(attempt){{
-    try{{
-      const r=await fetch(API_BASE+'/api/credits/stablecoin-payment',{{method:'POST',headers:{{'Authorization':'Bearer '+AUTH_TOKEN,'Content-Type':'application/json'}},body:JSON.stringify({{email:EMAIL,txHash:txHash,chainId:selectedChainId,chainName:ch.name,token:selectedToken,amount:AMOUNT,credits:CREDITS,bonusCredits:BONUS,totalCredits:TOTAL_CREDITS,isFirstPurchase:IS_FIRST}})}});
-      const res=await r.json();
-      if(r.ok&&res.status==='success')return{{ok:true,res}};
-      if(res.message&&res.message.includes('not found')&&attempt<5){{await new Promise(r=>setTimeout(r,5000));return tryBackend(attempt+1);}}
-      return{{ok:false,res}};
-    }}catch(e){{if(attempt<3){{await new Promise(r=>setTimeout(r,3000));return tryBackend(attempt+1);}}return{{ok:false,res:{{message:e.message}}}};}}
-  }}
-
-  await new Promise(r=>setTimeout(r,3000));
-  const result=await tryBackend(1);
-  document.getElementById('successCredits').textContent=TOTAL_CREDITS;
-  document.getElementById('txHashDisplay').textContent=txHash;
-  document.getElementById('txExplorerLink').href=ch.explorer+'/tx/'+txHash;
-  if(!result.ok){{document.getElementById('txHashDisplay').textContent=txHash+'\\n\\nBackend: '+(result.res.message||'unknown error')+'\\nCredits may take a moment to appear.';}}
-  showStep('stepSuccess');
-}}
-</script>
-</body></html>'''
-
-
-# =============================================================================
-# ROUTES: STABLECOIN PAYMENT VERIFICATION
-# =============================================================================
-
-@app.route('/api/credits/stablecoin-payment', methods=['POST', 'OPTIONS'])
-@cross_origin()
-def stablecoin_payment():
-    """Process stablecoin payment: verify on-chain and add credits"""
-    if request.method == 'OPTIONS':
-        return '', 204
-
-    try:
-        # Verify authentication
-        token = extract_token_from_request()
-        if not token:
-            return create_response("error", "Authentication required", status_code=401)
-
-        token_email = verify_token(token)
-        if not token_email:
-            return create_response("error", "Invalid or expired token", status_code=401)
-
-        data = request.get_json()
-        if not data:
-            return create_response("error", "No JSON data provided", status_code=400)
-
-        email = data.get('email', '').strip().lower()
-        tx_hash = data.get('txHash', '')
-        chain_id = data.get('chainId', 0)
-        chain_name = data.get('chainName', '')
-        token_symbol = data.get('token', '')
-        amount = data.get('amount', 0)
-        credits_amount = data.get('credits', 0)
-        bonus_credits = data.get('bonusCredits', 0)
-        total_credits = data.get('totalCredits', 0)
-        is_first_purchase = data.get('isFirstPurchase', False)
-
-        # Validate
-        if not tx_hash:
-            return create_response("error", "Transaction hash required", status_code=400)
-        if not validate_email(email):
-            return create_response("error", "Invalid email", status_code=400)
-        if email != token_email:
-            return create_response("error", "Email mismatch", status_code=403)
-        if total_credits <= 0:
-            return create_response("error", "Invalid credits amount", status_code=400)
-
-        # Check for duplicate transaction
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM payments WHERE bsv_txid = %s", (tx_hash,))
-        existing = cur.fetchone()
-
-        if existing:
-            cur.close()
-            conn.close()
-            return create_response("error", "Transaction already processed", status_code=409)
-
-        # Verify first purchase eligibility if claimed
-        if is_first_purchase:
-            if not check_first_purchase_available(email):
-                cur.close()
-                conn.close()
-                return create_response("error", "First purchase bonus already used", status_code=400)
-
-        # Verify on-chain
-        verified, verify_error = verify_stablecoin_tx_onchain(tx_hash, chain_id, token_symbol, float(amount))
-
-        if not verified:
-            logger.warning(f"Stablecoin tx verification failed: {verify_error}")
-            # Still process — the tx might not be mined yet, user saw it in MetaMask
-
-        # Create payment record
-        cur.execute('''
-            INSERT INTO payments (email, amount, credits, bonus_credits, total_credits, is_first_purchase, bsv_txid, payment_type, status, created_at, completed_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'stablecoin', 'completed', %s, %s)
-            RETURNING id
-        ''', (email, amount, credits_amount, bonus_credits, total_credits, is_first_purchase, tx_hash, datetime.now(), datetime.now()))
-
-        payment_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        # Add credits
-        new_balance = add_user_credits(email, total_credits)
-
-        # Mark first purchase if applicable
-        if is_first_purchase:
-            mark_first_purchase_used(email)
-
-        logger.info(f"Stablecoin payment: {payment_id}, tx={tx_hash}, chain={chain_name}, {total_credits} credits to {email}")
-
-        return create_response("success", "Payment processed", data={
-            "payment_id": payment_id,
-            "txHash": tx_hash,
-            "credits_added": total_credits,
-            "new_balance": new_balance,
-            "is_first_purchase": is_first_purchase
-        })
-
-    except Exception as e:
-        logger.error(f"Stablecoin payment error: {e}", exc_info=True)
-        return create_response("error", "Failed to process payment", status_code=500)
-
-
-
-# =============================================================================
-# TELEGRAM BOT HELPERS
-# =============================================================================
-
-TELEGRAM_API = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}' if TELEGRAM_BOT_TOKEN else ''
+def normalize_phone(phone):
+    """Normalize phone number to E.164 format (+1XXXXXXXXXX)"""
+    if not phone:
+        return None
+    digits = re.sub(r'[^\d+]', '', phone)
+    if digits.startswith('+'):
+        return digits
+    digits = re.sub(r'[^\d]', '', digits)
+    if len(digits) == 10:
+        return f'+1{digits}'
+    if len(digits) == 11 and digits.startswith('1'):
+        return f'+{digits}'
+    return f'+{digits}'
 
 
 def parse_driver_reply(body):
-    """Parse driver's reply into confirmed/declined/unknown"""
+    """Parse driver's SMS reply into confirmed/declined/unknown"""
     if not body:
         return 'unknown'
     cleaned = body.strip().lower()
     confirmed_words = ['yes', 'y', 'ok', 'confirm', 'confirmed', 'accept', 'accepted',
                        '10-4', '10 4', 'copy', 'roger', 'affirmative', 'sure', 'yep',
-                       'yeah', 'yea', 'da', 'si', '/yes']
+                       'yeah', 'yea', 'da', 'si']
     declined_words = ['no', 'n', 'decline', 'declined', 'reject', 'rejected', 'pass',
-                      "can't", 'cannot', 'cant', 'nope', 'negative', 'nah', 'net', 'nyet', '/no']
+                      "can't", 'cannot', 'cant', 'nope', 'negative', 'nah', 'net', 'nyet']
     if cleaned in confirmed_words or any(cleaned.startswith(w + ' ') for w in confirmed_words[:5]):
         return 'confirmed'
     if cleaned in declined_words or any(cleaned.startswith(w + ' ') for w in declined_words[:5]):
@@ -1900,196 +1465,176 @@ def parse_driver_reply(body):
     return 'unknown'
 
 
-def build_route_message(route_summary, route_link=None, pickup_info=None,
+def build_route_message(route_summary, route_link=None, pickup_info=None, 
                         delivery_info=None, estimated_miles=None, notes=None):
-    """Build a formatted route message for Telegram (supports Markdown)"""
-    lines = [f"\U0001f4cd *New Route Assignment*", f"Route: {route_summary}"]
+    """Build the route confirmation SMS text"""
+    lines = [f"New Route: {route_summary}"]
     if estimated_miles:
-        lines.append(f"Distance: ~{estimated_miles} miles")
-    if route_link:
-        lines.append(f"[Open in Google Maps]({route_link})")
+        lines.append(f"Distance: {estimated_miles} miles")
     if pickup_info:
         lines.append(f"Pickup: {pickup_info}")
     if delivery_info:
         lines.append(f"Delivery: {delivery_info}")
+    if route_link:
+        lines.append(f"Map: {route_link}")
     if notes:
         lines.append(f"Notes: {notes}")
     lines.append("")
-    lines.append("Reply *YES* to confirm or *NO* to decline.")
+    lines.append("Reply YES to confirm or NO to decline.")
     return "\n".join(lines)
 
 
-def _get_bot_api(bot_token=None):
-    """Get the Telegram API base URL for a given bot token (or default)"""
-    token = bot_token or TELEGRAM_BOT_TOKEN
-    if not token:
-        return None
-    return f'https://api.telegram.org/bot{token}'
-
-
-def telegram_send_message(chat_id, message, parse_mode='Markdown', bot_token=None):
-    """Send a message via Telegram Bot API"""
-    api_url = _get_bot_api(bot_token)
-    if not api_url:
-        return {'success': False, 'error': 'Telegram bot token not configured'}
-    if not chat_id:
-        return {'success': False, 'error': 'No chat_id provided'}
-
+def twilio_send_sms(to_phone, message):
+    """Send SMS via Twilio REST API (no SDK needed)"""
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+        return {'success': False, 'error': 'Twilio not configured'}
+    
+    to_normalized = normalize_phone(to_phone)
+    if not to_normalized:
+        return {'success': False, 'error': 'Invalid phone number'}
+    
     try:
-        url = f'{api_url}/sendMessage'
-        response = requests.post(url, json={
-            'chat_id': chat_id,
-            'text': message,
-            'parse_mode': parse_mode,
-        }, timeout=10)
-
-        data = response.json()
-        if data.get('ok'):
-            msg = data.get('result', {})
+        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+        response = requests.post(
+            url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                'From': TWILIO_PHONE_NUMBER,
+                'To': to_normalized,
+                'Body': message
+            },
+            timeout=30
+        )
+        
+        if response.status_code in (200, 201):
+            data = response.json()
             return {
                 'success': True,
-                'message_id': msg.get('message_id'),
-                'chat_id': chat_id,
+                'message_sid': data.get('sid'),
+                'to': to_normalized,
+                'status': data.get('status')
             }
         else:
-            error_desc = data.get('description', 'Unknown Telegram error')
-            logger.error(f"Telegram send failed: {error_desc}")
-            return {'success': False, 'error': error_desc}
-
+            error_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+            error_msg = error_data.get('message', f'Twilio API error: {response.status_code}')
+            logger.error(f"Twilio send failed: {response.status_code} - {error_msg}")
+            return {'success': False, 'error': error_msg}
     except requests.exceptions.Timeout:
-        return {'success': False, 'error': 'Telegram API timeout'}
+        return {'success': False, 'error': 'Twilio request timeout'}
     except Exception as e:
-        logger.error(f"Telegram send error: {e}")
+        logger.error(f"Twilio send error: {e}")
         return {'success': False, 'error': str(e)}
 
 
-def telegram_get_updates(offset=None, timeout=0, bot_token=None):
-    """Get recent messages sent to the bot"""
-    api_url = _get_bot_api(bot_token)
-    if not api_url:
-        return {'success': False, 'error': 'Telegram bot token not configured'}
-
+def twilio_check_replies(from_phone, since_timestamp=None):
+    """Check for inbound SMS replies from a specific phone number"""
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+        return {'success': False, 'error': 'Twilio not configured', 'replies': []}
+    
+    from_normalized = normalize_phone(from_phone)
+    if not from_normalized:
+        return {'success': False, 'error': 'Invalid phone number', 'replies': []}
+    
     try:
-        url = f'{api_url}/getUpdates'
-        params = {'timeout': timeout}
-        if offset:
-            params['offset'] = offset
-
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-
-        if data.get('ok'):
-            return {'success': True, 'updates': data.get('result', [])}
+        url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+        params = {
+            'To': TWILIO_PHONE_NUMBER,
+            'From': from_normalized,
+            'PageSize': 10,
+        }
+        if since_timestamp:
+            try:
+                dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
+                params['DateSent>'] = dt.strftime('%Y-%m-%d')
+            except (ValueError, AttributeError):
+                pass
+        
+        response = requests.get(
+            url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            params=params,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            messages = data.get('messages', [])
+            
+            replies = []
+            for msg in messages:
+                if msg.get('direction') in ('inbound',):
+                    msg_time = msg.get('date_sent', '')
+                    # Filter by since timestamp if provided
+                    if since_timestamp and msg_time:
+                        try:
+                            msg_dt = datetime.fromisoformat(msg_time.replace('Z', '+00:00').replace('+00:00', ''))
+                            since_dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00').replace('+00:00', ''))
+                            if msg_dt < since_dt:
+                                continue
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    replies.append({
+                        'body': msg.get('body', ''),
+                        'timestamp': msg_time,
+                        'from': msg.get('from', ''),
+                        'sid': msg.get('sid', '')
+                    })
+            
+            return {'success': True, 'replies': replies}
         else:
-            return {'success': False, 'error': data.get('description', 'Failed to get updates')}
-
+            logger.error(f"Twilio check replies failed: {response.status_code}")
+            return {'success': False, 'error': f'Twilio API error: {response.status_code}', 'replies': []}
     except Exception as e:
-        logger.error(f"Telegram getUpdates error: {e}")
-        return {'success': False, 'error': str(e)}
-
-
-def telegram_check_replies(chat_id, since_timestamp=None, bot_token=None):
-    """Check for replies from a specific chat_id since a given timestamp"""
-    result = telegram_get_updates(bot_token=bot_token)
-    if not result.get('success'):
-        return result
-
-    replies = []
-    since_unix = None
-    if since_timestamp:
-        try:
-            if isinstance(since_timestamp, str):
-                # Handle various ISO formats
-                ts = since_timestamp.replace('Z', '+00:00')
-                # If no timezone info, treat as UTC
-                if '+' not in ts and '-' not in ts[10:]:
-                    ts = ts + '+00:00'
-                since_dt = datetime.fromisoformat(ts)
-                since_unix = since_dt.timestamp()
-            else:
-                since_unix = float(since_timestamp)
-        except (ValueError, TypeError) as e:
-            logger.warning(f"Could not parse since_timestamp '{since_timestamp}': {e}")
-            since_unix = None
-
-    logger.info(f"Checking Telegram replies for chat_id={chat_id}, since_unix={since_unix}, updates_count={len(result.get('updates', []))}")
-
-    for update in result.get('updates', []):
-        msg = update.get('message', {})
-        msg_chat_id = str(msg.get('chat', {}).get('id', ''))
-        msg_date = msg.get('date', 0)
-        msg_text = msg.get('text', '')
-
-        if msg_chat_id != str(chat_id):
-            continue
-
-        logger.info(f"Found message from {msg_chat_id}: '{msg_text}' at {msg_date} (since={since_unix})")
-
-        # Give 30 second buffer to handle clock differences
-        if since_unix and msg_date < (since_unix - 30):
-            logger.info(f"Skipping old message: msg_date={msg_date} < since={since_unix - 30}")
-            continue
-        if msg_text:
-            replies.append({
-                'body': msg_text,
-                'timestamp': datetime.fromtimestamp(msg_date).isoformat(),
-                'from': msg_chat_id,
-                'update_id': update.get('update_id'),
-            })
-
-    status = 'pending'
-    latest_reply = None
-    if replies:
-        latest_reply = replies[-1]
-        status = parse_driver_reply(latest_reply['body'])
-
-    return {
-        'success': True,
-        'status': status,
-        'replies': replies,
-        'latest_reply': latest_reply,
-    }
+        logger.error(f"Twilio check replies error: {e}")
+        return {'success': False, 'error': str(e), 'replies': []}
 
 
 # =============================================================================
-# ROUTES: TELEGRAM MESSAGING
+# ROUTES: SMS MESSAGING
 # =============================================================================
 
 @app.route('/api/messaging/send', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_send():
-    """Send a free-form message to a driver via Telegram"""
+    """Send a free-form SMS to a driver"""
     if request.method == 'OPTIONS':
         return '', 204
-
     try:
         token = extract_token_from_request()
-        if not token or not verify_token(token):
+        if not token:
             return create_response("error", "Authentication required", status_code=401)
-
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
         data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
         driver_name = data.get('driverName', '')
         message = data.get('message', '')
-        chat_id = data.get('chatId', '').strip()
-        bot_token = data.get('botToken', '').strip() or None
-
+        phone = data.get('phone', '')
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
         if not message:
-            return create_response("error", "Message is required", status_code=400)
-        if not chat_id:
-            return create_response("error", "Driver chat ID is required. Driver must first message the bot on Telegram.", status_code=400)
-
-        result = telegram_send_message(chat_id, message, parse_mode=None, bot_token=bot_token)
-
-        if result.get('success'):
+            return create_response("error", "message is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_send_sms(phone, message)
+        
+        if result['success']:
             return create_response("success", "Message sent", data={
                 "success": True,
-                "message_id": result.get('message_id'),
-                "chat_id": chat_id,
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
                 "driver": driver_name,
-                "sent_at": datetime.now().isoformat(),
+                "sent_at": datetime.now().isoformat()
             })
         else:
-            return create_response("error", result.get('error', 'Failed to send'),
+            return create_response("error", result.get('error', 'Failed to send'), 
                                    data={"success": False, "error": result.get('error')}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging send error: {e}", exc_info=True)
@@ -2099,47 +1644,59 @@ def messaging_send():
 @app.route('/api/messaging/send-route', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_send_route():
-    """Send a route confirmation to a driver via Telegram"""
+    """Send a route confirmation SMS to a driver"""
     if request.method == 'OPTIONS':
         return '', 204
-
     try:
         token = extract_token_from_request()
-        if not token or not verify_token(token):
+        if not token:
             return create_response("error", "Authentication required", status_code=401)
-
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
         data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
         driver_name = data.get('driverName', '')
+        phone = data.get('phone', '')
         route_summary = data.get('routeSummary', '')
         route_link = data.get('routeLink')
         pickup_info = data.get('pickupInfo')
         delivery_info = data.get('deliveryInfo')
         estimated_miles = data.get('estimatedMiles')
         notes = data.get('notes')
-        chat_id = data.get('chatId', '').strip()
-        bot_token = data.get('botToken', '').strip() or None
-
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
         if not route_summary:
-            return create_response("error", "Route summary is required", status_code=400)
-        if not chat_id:
-            return create_response("error", "Driver chat ID is required. Driver must first message the bot on Telegram.", status_code=400)
-
-        message = build_route_message(route_summary, route_link, pickup_info,
-                                      delivery_info, estimated_miles, notes)
-
-        result = telegram_send_message(chat_id, message, bot_token=bot_token)
-
-        if result.get('success'):
+            return create_response("error", "routeSummary is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        message = build_route_message(
+            route_summary=route_summary,
+            route_link=route_link,
+            pickup_info=pickup_info,
+            delivery_info=delivery_info,
+            estimated_miles=estimated_miles,
+            notes=notes
+        )
+        
+        result = twilio_send_sms(phone, message)
+        
+        if result['success']:
             return create_response("success", "Route sent to driver", data={
                 "success": True,
-                "message_id": result.get('message_id'),
-                "chat_id": chat_id,
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
                 "driver": driver_name,
                 "sent_at": datetime.now().isoformat(),
-                "route_summary": route_summary,
+                "route_summary": route_summary
             })
         else:
-            return create_response("error", result.get('error', 'Failed to send'),
+            return create_response("error", result.get('error', 'Failed to send'), 
                                    data={"success": False, "error": result.get('error')}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging send-route error: {e}", exc_info=True)
@@ -2149,105 +1706,129 @@ def messaging_send_route():
 @app.route('/api/messaging/check-reply', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_check_reply():
-    """Check for driver reply via Telegram"""
+    """Check for driver's SMS reply"""
     if request.method == 'OPTIONS':
         return '', 204
-
     try:
         token = extract_token_from_request()
-        if not token or not verify_token(token):
+        if not token:
             return create_response("error", "Authentication required", status_code=401)
-
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
         data = request.get_json()
+        if not data:
+            return create_response("error", "No JSON data provided", status_code=400)
+        
         driver_name = data.get('driverName', '')
+        phone = data.get('phone', '')
         since = data.get('since')
-        chat_id = data.get('chatId', '').strip()
-        bot_token = data.get('botToken', '').strip() or None
-
-        if not chat_id:
-            return create_response("error", "Driver chat ID required", status_code=400)
-
-        result = telegram_check_replies(chat_id, since, bot_token=bot_token)
-
-        if result.get('success'):
-            return create_response("success", result.get('status', 'pending'), data={
-                "status": result.get('status', 'pending'),
-                "replies": result.get('replies', []),
-                "latest_reply": result.get('latest_reply'),
-                "driver": driver_name,
+        
+        if not driver_name:
+            return create_response("error", "driverName is required", status_code=400)
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_check_replies(phone, since)
+        
+        if not result['success']:
+            return create_response("error", result.get('error', 'Failed to check replies'),
+                                   data={"status": "error", "driver": driver_name, "error": result.get('error')},
+                                   status_code=500)
+        
+        replies = result.get('replies', [])
+        
+        if not replies:
+            return create_response("success", "No reply yet", data={
+                "status": "pending",
+                "replies": [],
+                "driver": driver_name
             })
-        else:
-            return create_response("error", result.get('error', 'Failed to check'),
-                                   data={"status": "error", "error": result.get('error')}, status_code=500)
+        
+        # Parse the latest reply
+        latest = replies[0]
+        reply_status = parse_driver_reply(latest.get('body', ''))
+        
+        return create_response("success", "Reply found", data={
+            "status": reply_status,
+            "replies": replies,
+            "latest_reply": latest,
+            "driver": driver_name
+        })
     except Exception as e:
         logger.error(f"Messaging check-reply error: {e}", exc_info=True)
-        return create_response("error", "Failed to check replies", status_code=500)
+        return create_response("error", "Failed to check reply", status_code=500)
 
 
 @app.route('/api/messaging/test', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_test():
-    """Test Telegram bot connection"""
+    """Test Twilio connection"""
     if request.method == 'OPTIONS':
         return '', 204
-
     try:
         token = extract_token_from_request()
-        if not token or not verify_token(token):
+        if not token:
             return create_response("error", "Authentication required", status_code=401)
-
-        data = request.get_json() or {}
-        bot_token = data.get('botToken', '').strip() or None
-        api_url = _get_bot_api(bot_token)
-
-        if not api_url:
-            return create_response("error", "Telegram bot token not configured", status_code=500)
-
-        url = f'{api_url}/getMe'
-        response = requests.get(url, timeout=10)
-        resp_data = response.json()
-
-        if resp_data.get('ok'):
-            bot_info = resp_data.get('result', {})
-            return create_response("success", "Telegram bot connected", data={
-                "success": True,
-                "bot_name": bot_info.get('first_name'),
-                "bot_username": bot_info.get('username'),
-            })
-        else:
-            return create_response("error", resp_data.get('description', 'Failed to connect'), status_code=500)
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
+        if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER]):
+            return create_response("error", "Twilio not configured", 
+                                   data={"success": False, "message": "Missing Twilio credentials"}, status_code=500)
+        
+        # Verify credentials by fetching account info
+        try:
+            url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}.json'
+            response = requests.get(url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=10)
+            
+            if response.status_code == 200:
+                return create_response("success", "Twilio connection OK", data={
+                    "success": True,
+                    "message": "Twilio is configured and connected",
+                    "phone_number": TWILIO_PHONE_NUMBER
+                })
+            else:
+                return create_response("error", "Twilio credentials invalid",
+                                       data={"success": False, "message": "Invalid Twilio credentials"}, status_code=500)
+        except Exception as e:
+            return create_response("error", f"Twilio connection failed: {str(e)}",
+                                   data={"success": False}, status_code=500)
     except Exception as e:
         logger.error(f"Messaging test error: {e}", exc_info=True)
-        return create_response("error", "Failed to test connection", status_code=500)
+        return create_response("error", "Test failed", status_code=500)
 
 
 @app.route('/api/messaging/test-message', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def messaging_test_message():
-    """Send a test message to a specific Telegram chat_id"""
+    """Send a test SMS"""
     if request.method == 'OPTIONS':
         return '', 204
-
     try:
         token = extract_token_from_request()
-        if not token or not verify_token(token):
+        if not token:
             return create_response("error", "Authentication required", status_code=401)
-
+        email = verify_token(token)
+        if not email:
+            return create_response("error", "Invalid or expired token", status_code=401)
+        
         data = request.get_json()
-        chat_id = data.get('chatId', '').strip()
-        bot_token = data.get('botToken', '').strip() or None
-
-        if not chat_id:
-            return create_response("error", "chatId is required", status_code=400)
-
-        result = telegram_send_message(chat_id, "\u2705 Test message from MilesOn. If you see this, Telegram messaging is working!", bot_token=bot_token)
-
-        if result.get('success'):
+        phone = data.get('phone', '') if data else ''
+        
+        if not phone:
+            return create_response("error", "phone is required", status_code=400)
+        
+        result = twilio_send_sms(phone, "Test message from MilesOn. If you received this, SMS is working!")
+        
+        if result['success']:
             return create_response("success", "Test message sent", data={
                 "success": True,
-                "message_id": result.get('message_id'),
-                "chat_id": chat_id,
-                "sent_at": datetime.now().isoformat(),
+                "message_id": result.get('message_sid'),
+                "phone": result.get('to'),
+                "sent_at": datetime.now().isoformat()
             })
         else:
             return create_response("error", result.get('error', 'Failed to send'),
@@ -2257,90 +1838,210 @@ def messaging_test_message():
         return create_response("error", "Failed to send test", status_code=500)
 
 
-@app.route('/api/messaging/bot-info', methods=['POST', 'OPTIONS'])
+# =============================================================================
+# ROUTES: AI ROUTE OPTIMIZER
+# =============================================================================
+# Optimizes trip stop order using AI.
+# Priority: Ollama (local, free) → Claude API (fallback)
+# Only city/state names are sent to the AI. No personal or business data.
+# =============================================================================
+
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3.2:1b')
+
+def _build_route_prompt(stops):
+    """Build optimization prompt from flat address list."""
+    pairs = []
+    for i in range(0, len(stops) - 1, 2):
+        load_num = (i // 2) + 1
+        pairs.append(f"Load {load_num}: Pickup at {stops[i]} -> Deliver to {stops[i+1]}")
+    
+    return f"""You are a trucking route optimizer. Given these loads, return the optimal driving order.
+
+LOADS:
+{chr(10).join(pairs)}
+
+RULES:
+- Each load's pickup MUST come before its delivery
+- Driver starts at Load 1's pickup
+- If multiple pickups are near each other geographically, batch them before delivering
+- Minimize total driving distance - no zigzagging across the country
+- If two consecutive stops are the same city, include it only once
+
+Return ONLY a JSON array of stop names in optimal driving order.
+Use the EXACT city names from the loads. No explanation, just the JSON array.
+Example: ["Spokane, WA", "Houston, TX", "Bryan, TX", "Salem, OR"]"""
+
+
+def _parse_ai_route_response(text, original):
+    """Parse AI response into stop list with validation."""
+    import re as _re
+    text = text.strip()
+    text = _re.sub(r'^```(?:json)?\s*', '', text)
+    text = _re.sub(r'\s*```$', '', text)
+    text = text.strip()
+    
+    match = _re.search(r'\[.*\]', text, _re.DOTALL)
+    if match:
+        text = match.group(0)
+    
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning(f"[RouteOptimizer] Failed to parse AI response: {text[:200]}")
+        return original
+    
+    if not isinstance(result, list) or len(result) < 2:
+        return original
+    
+    # Validate: at least 70% of unique original stops present
+    orig_set = set(s.lower().strip() for s in original)
+    result_set = set(s.lower().strip() for s in result)
+    matched = sum(1 for s in orig_set if s in result_set)
+    
+    if matched < len(orig_set) * 0.7:
+        logger.warning(f"[RouteOptimizer] AI dropped too many stops ({matched}/{len(orig_set)})")
+        return original
+    
+    return result
+
+
+def _ollama_available():
+    """Check if Ollama is running."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(f'{OLLAMA_URL}/api/tags', method='GET')
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            for m in data.get('models', []):
+                if m.get('name', '').startswith(OLLAMA_MODEL.split(':')[0]):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _call_ollama_route(stops):
+    """Call Ollama for route optimization (free, local)."""
+    import urllib.request
+    
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": _build_route_prompt(stops),
+        "stream": False,
+        "options": {"temperature": 0.1, "num_predict": 1024}
+    }).encode('utf-8')
+    
+    try:
+        req = urllib.request.Request(
+            f'{OLLAMA_URL}/api/generate',
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+        
+        text = result.get('response', '')
+        logger.info(f"[RouteOptimizer] Ollama response: {text[:300]}")
+        return _parse_ai_route_response(text, stops)
+        
+    except Exception as e:
+        logger.error(f"[RouteOptimizer] Ollama error: {e}")
+        return stops
+
+
+def _call_claude_route(stops):
+    """Call Claude API for route optimization (fallback)."""
+    import urllib.request
+    import urllib.error
+    
+    if not ANTHROPIC_API_KEY:
+        return stops
+    
+    payload = json.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": _build_route_prompt(stops)}]
+    }).encode('utf-8')
+    
+    try:
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=payload,
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+            },
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+        
+        text = ''.join(b.get('text', '') for b in result.get('content', []) if b.get('type') == 'text')
+        logger.info(f"[RouteOptimizer] Claude response: {text[:300]}")
+        return _parse_ai_route_response(text, stops)
+        
+    except Exception as e:
+        logger.error(f"[RouteOptimizer] Claude error: {e}")
+        return stops
+
+
+@app.route('/api/route/optimize', methods=['POST', 'OPTIONS'])
 @cross_origin()
-def messaging_bot_info():
-    """Get bot username so drivers know who to message"""
+def optimize_route():
+    """
+    POST /api/route/optimize
+    Body: { "addresses": ["City, ST", ...] }
+    
+    Only city/state names are sent to AI. No personal or business data.
+    """
     if request.method == 'OPTIONS':
         return '', 204
-
+    
     try:
-        data = request.get_json() or {}
-        bot_token = data.get('botToken', '').strip() or None
-        api_url = _get_bot_api(bot_token)
-
-        if not api_url:
-            return create_response("error", "Telegram not configured", status_code=500)
-
-        url = f'{api_url}/getMe'
-        response = requests.get(url, timeout=10)
-        resp_data = response.json()
-
-        if resp_data.get('ok'):
-            bot = resp_data.get('result', {})
-            return create_response("success", "Bot info", data={
-                "bot_username": bot.get('username'),
-                "bot_name": bot.get('first_name'),
-                "bot_link": f"https://t.me/{bot.get('username')}",
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No data provided", status_code=400)
+        
+        addresses = data.get('addresses', [])
+        
+        if len(addresses) < 4:
+            return create_response("success", "Too few stops to optimize", data={
+                "addresses": addresses, "optimized": False, "engine": "none"
             })
+        
+        logger.info(f"[RouteOptimizer] {len(addresses)} stops: {' -> '.join(addresses)}")
+        
+        # Try Ollama first (free), then Claude (paid fallback)
+        engine = "none"
+        optimized = addresses
+        
+        if _ollama_available():
+            logger.info(f"[RouteOptimizer] Using Ollama ({OLLAMA_MODEL})")
+            optimized = _call_ollama_route(addresses)
+            engine = "ollama"
+        elif ANTHROPIC_API_KEY:
+            logger.info("[RouteOptimizer] Ollama unavailable, using Claude API")
+            optimized = _call_claude_route(addresses)
+            engine = "claude"
         else:
-            return create_response("error", "Failed to get bot info", status_code=500)
-    except Exception as e:
-        return create_response("error", str(e), status_code=500)
-
-
-@app.route('/api/messaging/bot-users', methods=['POST', 'OPTIONS'])
-@cross_origin()
-def messaging_bot_users():
-    """List all unique users who have messaged the bot (for driver onboarding)"""
-    if request.method == 'OPTIONS':
-        return '', 204
-
-    try:
-        token = extract_token_from_request()
-        if not token or not verify_token(token):
-            return create_response("error", "Authentication required", status_code=401)
-
-        data = request.get_json() or {}
-        bot_token = data.get('botToken', '').strip() or None
-
-        api_url = _get_bot_api(bot_token)
-        if not api_url:
-            return create_response("error", "Telegram not configured", status_code=500)
-
-        result = telegram_get_updates(bot_token=bot_token)
-        if not result.get('success'):
-            return create_response("error", result.get('error', 'Failed to get updates'), status_code=500)
-
-        users = {}
-        for update in result.get('updates', []):
-            msg = update.get('message', {})
-            user = msg.get('from', {})
-            chat = msg.get('chat', {})
-            chat_id = str(chat.get('id', ''))
-
-            if chat_id and chat_id not in users:
-                users[chat_id] = {
-                    'chatId': chat_id,
-                    'firstName': user.get('first_name', ''),
-                    'lastName': user.get('last_name', ''),
-                    'username': user.get('username', ''),
-                    'lastMessage': msg.get('text', ''),
-                    'lastMessageAt': datetime.fromtimestamp(msg.get('date', 0)).isoformat(),
-                }
-            elif chat_id in users:
-                msg_date = msg.get('date', 0)
-                existing_date = datetime.fromisoformat(users[chat_id]['lastMessageAt']).timestamp()
-                if msg_date > existing_date:
-                    users[chat_id]['lastMessage'] = msg.get('text', '')
-                    users[chat_id]['lastMessageAt'] = datetime.fromtimestamp(msg_date).isoformat()
-
-        return create_response("success", f"{len(users)} users found", data={
-            "users": list(users.values()),
+            logger.warning("[RouteOptimizer] No AI available (no Ollama, no Claude API key)")
+        
+        was_changed = optimized != addresses
+        if was_changed:
+            logger.info(f"[RouteOptimizer] Optimized ({engine}): {' -> '.join(optimized)}")
+        
+        return create_response("success", "Route optimized" if was_changed else "Route unchanged", data={
+            "addresses": optimized,
+            "optimized": was_changed,
+            "engine": engine
         })
-
+        
     except Exception as e:
-        logger.error(f"Bot users error: {e}", exc_info=True)
+        logger.error(f"[RouteOptimizer] Error: {e}", exc_info=True)
         return create_response("error", str(e), status_code=500)
 
 
@@ -2403,7 +2104,7 @@ if __name__ == '__main__':
     logger.info(f"Port: {port}")
     logger.info(f"First purchase bonus: +{FIRST_PURCHASE_BONUS_CREDITS} credits")
     logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
-    logger.info(f"Telegram configured: {bool(TELEGRAM_BOT_TOKEN)}")
-    logger.info(f"Stablecoin merchant: {bool(STABLECOIN_MERCHANT_ADDRESS)}")
+    logger.info(f"Twilio configured: {bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER)}")
+    logger.info(f"Route optimizer: Ollama ({OLLAMA_MODEL}) + Claude fallback ({bool(ANTHROPIC_API_KEY)})")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
