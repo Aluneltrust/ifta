@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY index_railway.py .
 
-RUN ollama serve & sleep 5 && ollama pull llama3.2:1b && pkill ollama
+RUN ollama serve & sleep 5 && ollama pull llama3.2:3b && pkill ollama
 
 COPY start.sh .
 RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
