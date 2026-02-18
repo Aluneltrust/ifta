@@ -1981,7 +1981,7 @@ def _call_ollama_route(stops):
     
     try:
         req = urllib.request.Request(
-            f'{OLLAMA_URL}/api/generate',
+            f'{OLLAMA_URL}/api/chat',
             data=payload,
             headers={'Content-Type': 'application/json'},
             method='POST'
