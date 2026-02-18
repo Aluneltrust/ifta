@@ -1988,12 +1988,20 @@ def telegram_check_replies(chat_id, since_timestamp=None):
     if since_timestamp:
         try:
             if isinstance(since_timestamp, str):
-                since_dt = datetime.fromisoformat(since_timestamp.replace('Z', '+00:00'))
+                # Handle various ISO formats
+                ts = since_timestamp.replace('Z', '+00:00')
+                # If no timezone info, treat as UTC
+                if '+' not in ts and '-' not in ts[10:]:
+                    ts = ts + '+00:00'
+                since_dt = datetime.fromisoformat(ts)
                 since_unix = since_dt.timestamp()
             else:
                 since_unix = float(since_timestamp)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not parse since_timestamp '{since_timestamp}': {e}")
             since_unix = None
+
+    logger.info(f"Checking Telegram replies for chat_id={chat_id}, since_unix={since_unix}, updates_count={len(result.get('updates', []))}")
 
     for update in result.get('updates', []):
         msg = update.get('message', {})
@@ -2003,7 +2011,12 @@ def telegram_check_replies(chat_id, since_timestamp=None):
 
         if msg_chat_id != str(chat_id):
             continue
-        if since_unix and msg_date <= since_unix:
+
+        logger.info(f"Found message from {msg_chat_id}: '{msg_text}' at {msg_date} (since={since_unix})")
+
+        # Give 30 second buffer to handle clock differences
+        if since_unix and msg_date < (since_unix - 30):
+            logger.info(f"Skipping old message: msg_date={msg_date} < since={since_unix - 30}")
             continue
         if msg_text:
             replies.append({
