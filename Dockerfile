@@ -20,8 +20,8 @@ COPY sms.py .
 COPY route_optimizer.py .
 
 # Pull model at build time (baked into the image — no download at runtime)
-# Using llama3.2:1b (1.3GB) — smallest model that handles route logic well
-RUN ollama serve & sleep 5 && ollama pull llama3.2:1b && pkill ollama
+# Using llama3.2:3b (2GB) — better geographic reasoning for route optimization
+RUN ollama serve & sleep 5 && ollama pull llama3.2:3b && pkill ollama
 
 # Start script: launch Ollama in background, then Flask
 COPY Start.sh .
