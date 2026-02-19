@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import urllib.request
+import urllib.error
 
 from config import ANTHROPIC_API_KEY, OLLAMA_URL, OLLAMA_MODEL
 
@@ -156,6 +157,10 @@ def call_claude_route(stops):
         text = ''.join(b.get('text', '') for b in result.get('content', []) if b.get('type') == 'text')
         logger.info(f"[RouteOptimizer] Claude response: {text[:300]}")
         return _parse_ai_route_response(text, stops)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8') if e.fp else 'no body'
+        logger.error(f"[RouteOptimizer] Claude HTTP {e.code}: {error_body}")
+        return stops
     except Exception as e:
         logger.error(f"[RouteOptimizer] Claude error: {e}")
         return stops
