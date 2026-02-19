@@ -6,7 +6,7 @@ import time
 import uuid
 import re
 
-from railway.config import SECRET_KEY
+from config import SECRET_KEY
 
 
 # =============================================================================
