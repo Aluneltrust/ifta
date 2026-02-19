@@ -18,23 +18,23 @@ def _build_route_prompt(stops):
     unique_stops = list(dict.fromkeys(stops))
     stops_list = ', '.join(f'"{s}"' for s in unique_stops)
 
-    return f"""You are a truck dispatcher. Sort these stops into the shortest driving route.
+    return f"""You are an experienced truck dispatcher planning the driving order for one truck.
 
-LOADS:
+The loads MUST be done roughly in this sequence (Load 1 first, then Load 2, etc.):
 {chr(10).join(pairs)}
 
-AVAILABLE STOPS (use EXACTLY these names):
+AVAILABLE STOPS (use EXACTLY these names, include every stop):
 {stops_list}
 
-CRITICAL RULES:
-1. Each load's pickup MUST come before its delivery
-2. Group geographically close stops together - do NOT jump back and forth between regions
-3. Complete all stops in one region before traveling to the next region
-4. Texas cities must be grouped together, Washington/Idaho cities must be grouped together
+RULES:
+1. Follow the load number sequence - Load 1 pickup/delivery happens before Load 2, Load 2 before Load 3, etc.
+2. Each load's pickup MUST come before its delivery
+3. HOWEVER, if you are already in a region and another load's pickup is nearby, pick it up before leaving that region. Group nearby pickups together and nearby deliveries together when possible.
+4. Similarly, if two deliveries are in the same region, deliver them together
 5. Remove consecutive duplicate cities
-6. Do NOT add or rename any stops
+6. Do NOT add, remove, or rename any stops - include ALL stops
 
-Return ONLY a JSON array, nothing else.
+Return ONLY a JSON array of city names in driving order, nothing else.
 Example: ["City1, ST", "City2, ST", "City3, ST"]"""
 
 
