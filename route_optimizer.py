@@ -4,7 +4,7 @@ import re
 import urllib.request
 import urllib.error
 
-from config import ANTHROPIC_API_KEY, OLLAMA_URL, OLLAMA_MODEL
+from config import ANTHROPIC_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -96,43 +96,6 @@ def _parse_ai_route_response(text, original):
     return mapped_result
 
 
-def ollama_available():
-    try:
-        req = urllib.request.Request(f'{OLLAMA_URL}/api/tags', method='GET')
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            for m in data.get('models', []):
-                if m.get('name', '').startswith(OLLAMA_MODEL.split(':')[0]):
-                    return True
-        return False
-    except Exception:
-        return False
-
-
-def call_ollama_route(stops):
-    payload = json.dumps({
-        "model": OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": _build_route_prompt(stops)}],
-        "stream": False,
-        "options": {"temperature": 0.1, "num_predict": 1024}
-    }).encode('utf-8')
-    try:
-        req = urllib.request.Request(
-            f'{OLLAMA_URL}/api/chat',
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode('utf-8'))
-        text = result.get('message', {}).get('content', '')
-        logger.info(f"[RouteOptimizer] Ollama response: {text[:300]}")
-        return _parse_ai_route_response(text, stops)
-    except Exception as e:
-        logger.error(f"[RouteOptimizer] Ollama error: {e}")
-        return stops
-
-
 def call_claude_route(stops):
     if not ANTHROPIC_API_KEY:
         return stops
@@ -169,11 +132,8 @@ def call_claude_route(stops):
 def optimize_stops(addresses):
     """Main entry point. Returns (optimized_list, engine_name)."""
     if ANTHROPIC_API_KEY:
-        logger.info("[RouteOptimizer] Using Claude API (primary)")
+        logger.info("[RouteOptimizer] Using Claude API")
         return call_claude_route(addresses), "claude"
-    elif ollama_available():
-        logger.info(f"[RouteOptimizer] No Claude API key, using Ollama ({OLLAMA_MODEL})")
-        return call_ollama_route(addresses), "ollama"
     else:
-        logger.warning("[RouteOptimizer] No AI available")
+        logger.warning("[RouteOptimizer] No ANTHROPIC_API_KEY configured")
         return addresses, "none"
