@@ -23,7 +23,7 @@ from config import (
     FIRST_PURCHASE_BONUS_CREDITS,
     SQUARE_ACCESS_TOKEN, SQUARE_LOCATION_ID, SQUARE_ENVIRONMENT, SQUARE_API_URL,
     TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER,
-    ANTHROPIC_API_KEY, OLLAMA_URL, OLLAMA_MODEL,
+    ANTHROPIC_API_KEY,
 )
 from auth import (
     hash_password, verify_password, validate_password,
@@ -1169,6 +1169,6 @@ if __name__ == '__main__':
     logger.info(f"First purchase bonus: +{FIRST_PURCHASE_BONUS_CREDITS} credits")
     logger.info(f"Square configured: {bool(SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID)}")
     logger.info(f"Twilio configured: {bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER)}")
-    logger.info(f"Route optimizer: Ollama ({OLLAMA_MODEL}) + Claude fallback ({bool(ANTHROPIC_API_KEY)})")
+    logger.info(f"Route optimizer: Claude API ({bool(ANTHROPIC_API_KEY)})")
     logger.info("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)
