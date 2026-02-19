@@ -18,4 +18,4 @@ COPY route_optimizer.py .
 
 EXPOSE ${PORT:-5000}
 
-CMD ["gunicorn", "railway:app", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "120", "--preload"]
+CMD ["gunicorn", "railway:app", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "120"]
