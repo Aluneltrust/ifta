@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
-# Install dependencies
-RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*
+# Install dependencies and apply security patches
+RUN apt-get update && apt-get upgrade -y && apt-get install -y curl procps zstd && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama
 RUN curl -fsSL https://ollama.com/install.sh | sh
