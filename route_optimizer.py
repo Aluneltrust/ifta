@@ -3,7 +3,7 @@ import logging
 import re
 import urllib.request
 
-from railway.config import ANTHROPIC_API_KEY, OLLAMA_URL, OLLAMA_MODEL
+from config import ANTHROPIC_API_KEY, OLLAMA_URL, OLLAMA_MODEL
 
 logger = logging.getLogger(__name__)
 
