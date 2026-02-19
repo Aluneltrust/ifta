@@ -163,12 +163,12 @@ def call_claude_route(stops):
 
 def optimize_stops(addresses):
     """Main entry point. Returns (optimized_list, engine_name)."""
-    if ollama_available():
-        logger.info(f"[RouteOptimizer] Using Ollama ({OLLAMA_MODEL})")
-        return call_ollama_route(addresses), "ollama"
-    elif ANTHROPIC_API_KEY:
-        logger.info("[RouteOptimizer] Ollama unavailable, using Claude API")
+    if ANTHROPIC_API_KEY:
+        logger.info("[RouteOptimizer] Using Claude API (primary)")
         return call_claude_route(addresses), "claude"
+    elif ollama_available():
+        logger.info(f"[RouteOptimizer] No Claude API key, using Ollama ({OLLAMA_MODEL})")
+        return call_ollama_route(addresses), "ollama"
     else:
         logger.warning("[RouteOptimizer] No AI available")
         return addresses, "none"
