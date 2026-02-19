@@ -1,10 +1,7 @@
 FROM python:3.13-slim
 
-# Install dependencies and apply security patches
-RUN apt-get update && apt-get upgrade -y && apt-get install -y curl procps zstd && rm -rf /var/lib/apt/lists/*
-
-# Install Ollama
-RUN curl -fsSL https://ollama.com/install.sh | sh
+# Apply security patches
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -19,14 +16,6 @@ COPY email_service.py .
 COPY sms.py .
 COPY route_optimizer.py .
 
-# Pull model at build time (baked into the image — no download at runtime)
-# Using llama3.2:3b (2GB) — better geographic reasoning for route optimization
-RUN ollama serve & sleep 5 && ollama pull llama3.2:3b && pkill ollama
-
-# Start script: launch Ollama in background, then Flask
-COPY Start.sh .
-RUN chmod +x Start.sh
-
 EXPOSE ${PORT:-5000}
 
-CMD ["./Start.sh"]
+CMD ["gunicorn", "railway:app", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120"]
