@@ -1107,23 +1107,16 @@ def optimize_route():
         logger.error(f"[RouteOptimizer] Error: {e}", exc_info=True)
         return create_response("error", str(e), status_code=500)
 
-
 # =============================================================================
 # ROUTES: RECEIPT SCANNING (Claude Vision)
-# Add these imports at the TOP of railway.py (if not already present):
-#   import json, re, urllib.request, urllib.error
+# Paste into railway.py before the debug section.
+# Make sure these imports exist at the top of railway.py:
+#   import json, re, urllib.request, urllib.error, traceback
 # =============================================================================
 
 @app.route('/api/receipt/scan', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def scan_receipt():
-    """
-    POST /api/receipt/scan
-    Body: {
-        "images": ["base64_data", ...],
-        "routeAddresses": ["Spokane, WA", "Beach, ND", ...] (optional)
-    }
-    """
     if request.method == 'OPTIONS':
         return '', 204
 
@@ -1141,36 +1134,39 @@ def scan_receipt():
         if not images:
             return create_response("error", "No images provided", status_code=400)
 
-        if len(images) > 10:
-            return create_response("error", "Maximum 10 images per request", status_code=400)
+        logger.info(f"[ReceiptScan] Processing {len(images)} files, route has {len(route_addresses)} stops")
 
-        import json as _json
-        import re as _re
-        import urllib.request as _urlreq
-        import urllib.error as _urlerr
-
-        # Build Claude message content
+        # Build content array for Claude
         content = []
-        for img_data in images:
+        for i, img_data in enumerate(images):
             media_type = 'image/jpeg'
             pure_base64 = img_data
+
             if img_data.startswith('data:'):
-                header, pure_base64 = img_data.split(',', 1)
-                if 'pdf' in header:
+                try:
+                    header, pure_base64 = img_data.split(',', 1)
+                except ValueError:
+                    logger.error(f"[ReceiptScan] Invalid data URL format for image {i}")
+                    continue
+
+                header_lower = header.lower()
+                if 'pdf' in header_lower:
                     media_type = 'application/pdf'
-                elif 'png' in header:
+                elif 'png' in header_lower:
                     media_type = 'image/png'
-                elif 'webp' in header:
+                elif 'webp' in header_lower:
                     media_type = 'image/webp'
-                elif 'gif' in header:
+                elif 'gif' in header_lower:
                     media_type = 'image/gif'
+
+            logger.info(f"[ReceiptScan] File {i}: {media_type}, base64 length: {len(pure_base64)}")
 
             if media_type == 'application/pdf':
                 content.append({
                     "type": "document",
                     "source": {
                         "type": "base64",
-                        "media_type": media_type,
+                        "media_type": "application/pdf",
                         "data": pure_base64,
                     }
                 })
@@ -1184,70 +1180,58 @@ def scan_receipt():
                     }
                 })
 
-        # Build prompt based on whether route context is provided
+        if not content:
+            return create_response("error", "No valid files to process", status_code=400)
+
+        # Build prompt
         if route_addresses and len(route_addresses) >= 2:
             route_list = ' -> '.join(route_addresses)
             prompt = (
                 "Analyze these fuel receipt images or fuel card transaction reports.\n\n"
                 "For EACH fuel transaction/receipt, extract:\n"
-                "- date: format as MM.DD (e.g. 11.01)\n"
-                "- city: city name where fuel was purchased\n"
-                "- state: 2-letter state code (e.g. WA, OR, ND)\n"
-                "- gallons: total gallons purchased (round up to whole number)\n"
-                "- paid: total amount paid in dollars\n\n"
-                "IMPORTANT for fuel card transaction reports (tables):\n"
-                "- For the paid field: use the Disc PPU (discounted price per unit) column multiplied by gallons if available. "
-                "If there is no Disc PPU column, use the Amount column.\n"
-                "- Extract one entry per transaction row.\n"
-                "- Do NOT include summary/total rows.\n"
-                "- Sort entries by date (earliest first).\n\n"
-                "For individual receipts: extract total gallons and total amount paid.\n\n"
-                "If a field is not visible or unclear, use empty string.\n\n"
-                f"The driver's delivery route stops (in order) are:\n{route_list}\n\n"
-                "You must also return an orderedRoute array that interleaves the fuel stops "
-                "into the delivery route in the correct geographic/chronological position. "
-                "Mark each fuel stop with a * suffix to distinguish them from delivery stops.\n\n"
-                "Use the transaction dates and geographic knowledge to determine the correct position. "
-                "A fuel stop dated 11.01 between stop A and stop B geographically should be placed between A and B. "
-                "If the driver visits a city multiple times (round trip), place each fuel stop in the correct leg based on its date.\n\n"
-                'Return ONLY valid JSON:\n'
-                '{"entries": [{"date": "11.01", "city": "Beach", "state": "ND", "gallons": "85", "paid": "275.50"}], '
-                '"orderedRoute": ["Spokane, WA", "Beach, ND*", "Chicago, IL", "Spokane, WA"]}'
+                "- date: MM.DD format\n"
+                "- city: city name\n"
+                "- state: 2-letter state code\n"
+                "- gallons: round up to whole number\n"
+                "- paid: total dollars (use Disc PPU * gallons if available, otherwise Amount column)\n\n"
+                "Do NOT include summary/total rows. Sort by date.\n\n"
+                "The driver route is: " + route_list + "\n\n"
+                "Also return orderedRoute: the full route with fuel stops interleaved geographically. "
+                "Mark fuel stops with * suffix.\n\n"
+                'Return ONLY JSON: {"entries": [{"date":"11.01","city":"Beach","state":"ND","gallons":"85","paid":"275.50"}], '
+                '"orderedRoute": ["Spokane, WA", "Beach, ND*", "Chicago, IL"]}'
             )
         else:
             prompt = (
                 "Analyze these fuel receipt images or fuel card transaction reports.\n\n"
                 "For EACH fuel transaction/receipt, extract:\n"
-                "- date: format as MM.DD (e.g. 11.01)\n"
-                "- city: city name where fuel was purchased\n"
-                "- state: 2-letter state code (e.g. WA, OR, ND)\n"
-                "- gallons: total gallons purchased (round up to whole number)\n"
-                "- paid: total amount paid in dollars\n\n"
-                "IMPORTANT for fuel card transaction reports (tables):\n"
-                "- For the paid field: use the Disc PPU (discounted price per unit) column multiplied by gallons if available. "
-                "If there is no Disc PPU column, use the Amount column.\n"
-                "- Extract one entry per transaction row.\n"
-                "- Do NOT include summary/total rows.\n"
-                "- Sort entries by date (earliest first).\n\n"
-                "For individual receipts: extract total gallons and total amount paid.\n\n"
-                "If a field is not visible or unclear, use empty string.\n\n"
-                'Return ONLY a JSON array:\n'
-                '[{"date": "11.01", "city": "Beach", "state": "ND", "gallons": "85", "paid": "275.50"}]'
+                "- date: MM.DD format\n"
+                "- city: city name\n"
+                "- state: 2-letter state code\n"
+                "- gallons: round up to whole number\n"
+                "- paid: total dollars (use Disc PPU * gallons if available, otherwise Amount column)\n\n"
+                "Do NOT include summary/total rows. Sort by date.\n\n"
+                'Return ONLY JSON array: [{"date":"11.01","city":"Beach","state":"ND","gallons":"85","paid":"275.50"}]'
             )
 
         content.append({"type": "text", "text": prompt})
 
-        logger.info(f"[ReceiptScan] Sending {len(images)} images, route has {len(route_addresses)} stops")
+        # Call Claude API
+        import json as json_mod
+        import urllib.request as url_req
+        import urllib.error as url_err
 
-        payload = _json.dumps({
+        body = json_mod.dumps({
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 4096,
             "messages": [{"role": "user", "content": content}]
         }).encode('utf-8')
 
-        req = _urlreq.Request(
+        logger.info(f"[ReceiptScan] Sending to Claude API, payload size: {len(body)} bytes")
+
+        req = url_req.Request(
             'https://api.anthropic.com/v1/messages',
-            data=payload,
+            data=body,
             headers={
                 'Content-Type': 'application/json',
                 'x-api-key': ANTHROPIC_API_KEY,
@@ -1256,24 +1240,30 @@ def scan_receipt():
             method='POST'
         )
 
-        with _urlreq.urlopen(req, timeout=90) as resp:
-            result = _json.loads(resp.read().decode('utf-8'))
+        try:
+            with url_req.urlopen(req, timeout=90) as resp:
+                result = json_mod.loads(resp.read().decode('utf-8'))
+        except url_err.HTTPError as api_err:
+            error_body = api_err.read().decode('utf-8') if api_err.fp else 'no body'
+            logger.error(f"[ReceiptScan] Claude API HTTP {api_err.code}: {error_body[:1000]}")
+            return create_response("error", f"AI service returned {api_err.code}: {error_body[:200]}", status_code=500)
 
+        # Extract text from response
         text = ''.join(
             b.get('text', '') for b in result.get('content', [])
             if b.get('type') == 'text'
         )
 
-        logger.info(f"[ReceiptScan] Claude response: {text[:800]}")
+        logger.info(f"[ReceiptScan] Claude response ({len(text)} chars): {text[:500]}")
 
-        # Clean markdown fences
+        # Parse JSON
+        import re as re_mod
         text = text.strip()
-        text = _re.sub(r'^```(?:json)?\s*', '', text)
-        text = _re.sub(r'\s*```$', '', text).strip()
+        text = re_mod.sub(r'^```(?:json)?\s*', '', text)
+        text = re_mod.sub(r'\s*```$', '', text).strip()
 
-        parsed = _json.loads(text)
+        parsed = json_mod.loads(text)
 
-        # Handle both formats
         if isinstance(parsed, list):
             entries = parsed
             ordered_route = []
@@ -1287,7 +1277,6 @@ def scan_receipt():
         if not isinstance(entries, list):
             entries = [entries]
 
-        # Validate and clean
         cleaned = []
         for entry in entries:
             city = str(entry.get('city', '')).strip()
@@ -1301,24 +1290,21 @@ def scan_receipt():
                     'paid': str(entry.get('paid', '')).strip(),
                 })
 
-        logger.info(f"[ReceiptScan] Extracted {len(cleaned)} fuel entries, orderedRoute: {len(ordered_route)} stops")
+        logger.info(f"[ReceiptScan] OK: {len(cleaned)} entries, {len(ordered_route)} route stops")
 
-        response_data = {"entries": cleaned}
+        resp_data = {"entries": cleaned}
         if ordered_route:
-            response_data["orderedRoute"] = ordered_route
+            resp_data["orderedRoute"] = ordered_route
 
-        return create_response("success", f"Extracted {len(cleaned)} entries", data=response_data)
+        return create_response("success", f"Extracted {len(cleaned)} entries", data=resp_data)
 
-    except _json.JSONDecodeError as e:
-        logger.error(f"[ReceiptScan] JSON parse error: {e}")
-        return create_response("error", "Failed to parse receipt data from AI", status_code=500)
-    except _urlerr.HTTPError as e:
-        error_body = e.read().decode('utf-8') if e.fp else 'no body'
-        logger.error(f"[ReceiptScan] Claude API HTTP {e.code}: {error_body[:500]}")
-        return create_response("error", f"AI service error: {e.code}", status_code=500)
     except Exception as e:
-        logger.error(f"[ReceiptScan] Unexpected error: {e}", exc_info=True)
-        return create_response("error", str(e), status_code=500)
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"[ReceiptScan] UNEXPECTED ERROR: {e}\n{tb}")
+        return create_response("error", f"Server error: {str(e)}", status_code=500)
+    
+
     
 # =============================================================================
 # ROUTES: DEBUG
