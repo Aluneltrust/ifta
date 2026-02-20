@@ -1117,7 +1117,10 @@ def optimize_route():
 def scan_receipt():
     """
     POST /api/receipt/scan
-    Body: { "images": ["base64_data", ...] }
+    Body: {
+        "images": ["base64_data", ...],
+        "routeAddresses": ["Spokane, WA", "Beach, ND", ...] (optional)
+    }
     
     Accepts receipt images (jpg/png) and fuel card transaction reports (pdf).
     Sends to Claude Vision API to extract fuel stop data.
@@ -1135,6 +1138,8 @@ def scan_receipt():
             return create_response("error", "No data provided", status_code=400)
 
         images = data.get('images', [])
+        route_addresses = data.get('routeAddresses', [])
+
         if not images:
             return create_response("error", "No images provided", status_code=400)
 
@@ -1157,7 +1162,6 @@ def scan_receipt():
                 elif 'gif' in header:
                     media_type = 'image/gif'
 
-            # PDFs use document type, images use image type
             if media_type == 'application/pdf':
                 content.append({
                     "type": "document",
@@ -1177,22 +1181,38 @@ def scan_receipt():
                     }
                 })
 
+        # Build the route context for logical ordering
+        route_context = ""
+        if route_addresses:
+            route_context = f"""
+
+The driver's route is: {' -> '.join(route_addresses)}
+Return the fuel stops in the logical order they would have been visited along this route.
+Use geographic knowledge to place each fuel stop in the correct position along the route."""
+
         content.append({
             "type": "text",
-            "text": """Analyze these fuel receipt images or fuel card transaction reports.
+            "text": f"""Analyze these fuel receipt images or fuel card transaction reports.
 
-For EACH fuel transaction/receipt, extract ONLY:
+For EACH fuel transaction/receipt, extract:
+- date: format as MM.DD (e.g. 11.01)
 - city: city name where fuel was purchased
 - state: 2-letter state code (e.g. WA, OR, ND)
+- gallons: total gallons purchased (round up to whole number)
+- paid: total amount paid in dollars
 
-For transaction reports (tables with multiple rows), extract one entry per row/transaction.
-Look for columns like "City", "State/Prov", "Location Name" to find the data.
+IMPORTANT for fuel card transaction reports (tables):
+- For the "paid" field: use the "Disc PPU" (discounted price per unit) column multiplied by gallons if available. If there is no Disc PPU column, use the Amount column.
+- Extract one entry per transaction row.
+- Do NOT include summary/total rows.
+
+For individual receipts:
+- Extract the total gallons and total amount paid from each receipt.
 
 If a field is not visible or unclear, use empty string "".
-Do NOT include summary/total rows.
-
+{route_context}
 Return ONLY a JSON array, no other text:
-[{"city": "Beach", "state": "ND"}, {"city": "Rockville", "state": "MN"}]"""
+[{{"date": "11.01", "city": "Beach", "state": "ND", "gallons": "85", "paid": "275.50"}}]"""
         })
 
         import json
@@ -1270,6 +1290,7 @@ Return ONLY a JSON array, no other text:
     except Exception as e:
         logger.error(f"[ReceiptScan] Error: {e}", exc_info=True)
         return create_response("error", str(e), status_code=500)
+    
     
 # =============================================================================
 # ROUTES: DEBUG
