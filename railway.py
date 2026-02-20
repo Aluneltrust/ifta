@@ -1109,6 +1109,169 @@ def optimize_route():
 
 
 # =============================================================================
+# ROUTES: RECEIPT SCANNING (Claude Vision)
+# =============================================================================
+
+@app.route('/api/receipt/scan', methods=['POST', 'OPTIONS'])
+@cross_origin()
+def scan_receipt():
+    """
+    POST /api/receipt/scan
+    Body: { "images": ["base64_data", ...] }
+    
+    Accepts receipt images (jpg/png) and fuel card transaction reports (pdf).
+    Sends to Claude Vision API to extract fuel stop data.
+    Returns: { entries: [{ date, city, state, gallons, paid }] }
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    if not ANTHROPIC_API_KEY:
+        return create_response("error", "AI service not configured", status_code=500)
+
+    try:
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No data provided", status_code=400)
+
+        images = data.get('images', [])
+        if not images:
+            return create_response("error", "No images provided", status_code=400)
+
+        if len(images) > 10:
+            return create_response("error", "Maximum 10 images per request", status_code=400)
+
+        # Build Claude message with all images/documents
+        content = []
+        for img_data in images:
+            media_type = 'image/jpeg'
+            pure_base64 = img_data
+            if img_data.startswith('data:'):
+                header, pure_base64 = img_data.split(',', 1)
+                if 'pdf' in header:
+                    media_type = 'application/pdf'
+                elif 'png' in header:
+                    media_type = 'image/png'
+                elif 'webp' in header:
+                    media_type = 'image/webp'
+                elif 'gif' in header:
+                    media_type = 'image/gif'
+
+            # PDFs use document type, images use image type
+            if media_type == 'application/pdf':
+                content.append({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": pure_base64,
+                    }
+                })
+            else:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": pure_base64,
+                    }
+                })
+
+        content.append({
+            "type": "text",
+            "text": """Analyze these fuel receipt images or fuel card transaction reports.
+
+For EACH fuel transaction/receipt, extract ONLY:
+- city: city name where fuel was purchased
+- state: 2-letter state code (e.g. WA, OR, ND)
+
+For transaction reports (tables with multiple rows), extract one entry per row/transaction.
+Look for columns like "City", "State/Prov", "Location Name" to find the data.
+
+If a field is not visible or unclear, use empty string "".
+Do NOT include summary/total rows.
+
+Return ONLY a JSON array, no other text:
+[{"city": "Beach", "state": "ND"}, {"city": "Rockville", "state": "MN"}]"""
+        })
+
+        import json
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": content}]
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=payload,
+            headers={
+                'Content-Type': 'application/json',
+                'x-api-key': ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+            },
+            method='POST'
+        )
+
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+
+        text = ''.join(
+            b.get('text', '') for b in result.get('content', [])
+            if b.get('type') == 'text'
+        )
+
+        logger.info(f"[ReceiptScan] Claude response: {text[:500]}")
+
+        import re
+        text = text.strip()
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text).strip()
+
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            text = match.group(0)
+
+        entries = json.loads(text)
+
+        if not isinstance(entries, list):
+            entries = [entries]
+
+        # Validate and clean — only include entries with city AND state
+        cleaned = []
+        for entry in entries:
+            city = str(entry.get('city', '')).strip()
+            state = str(entry.get('state', '')).strip().upper()[:2]
+            if city and state:
+                cleaned.append({
+                    'date': str(entry.get('date', '')).strip(),
+                    'city': city,
+                    'state': state,
+                    'gallons': str(entry.get('gallons', '')).strip(),
+                    'paid': str(entry.get('paid', '')).strip(),
+                })
+
+        logger.info(f"[ReceiptScan] Extracted {len(cleaned)} fuel entries")
+
+        return create_response("success", f"Extracted {len(cleaned)} entries", data={
+            "entries": cleaned
+        })
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[ReceiptScan] JSON parse error: {e}")
+        return create_response("error", "Failed to parse receipt data", status_code=500)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8') if e.fp else 'no body'
+        logger.error(f"[ReceiptScan] Claude HTTP {e.code}: {error_body}")
+        return create_response("error", f"AI service error: {e.code}", status_code=500)
+    except Exception as e:
+        logger.error(f"[ReceiptScan] Error: {e}", exc_info=True)
+        return create_response("error", str(e), status_code=500)
+    
+# =============================================================================
 # ROUTES: DEBUG
 # =============================================================================
 @app.route('/api/debug/database', methods=['GET', 'OPTIONS'])
