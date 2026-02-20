@@ -1124,7 +1124,8 @@ def scan_receipt():
     
     Accepts receipt images (jpg/png) and fuel card transaction reports (pdf).
     Sends to Claude Vision API to extract fuel stop data.
-    Returns: { entries: [{ date, city, state, gallons, paid }] }
+    If routeAddresses provided, returns fuel stops interleaved in logical route order.
+    Returns: { entries: [...], orderedRoute: ["Spokane, WA", "Beach, ND*", ...] }
     """
     if request.method == 'OPTIONS':
         return '', 204
@@ -1181,14 +1182,29 @@ def scan_receipt():
                     }
                 })
 
-        # Build the route context for logical ordering
+        # Build route context for logical ordering
         route_context = ""
+        ordering_instruction = ""
         if route_addresses:
+            route_list = ' -> '.join(route_addresses)
             route_context = f"""
 
-The driver's route is: {' -> '.join(route_addresses)}
-Return the fuel stops in the logical order they would have been visited along this route.
-Use geographic knowledge to place each fuel stop in the correct position along the route."""
+The driver's delivery route stops (in order) are:
+{route_list}
+
+IMPORTANT: You must also return an "orderedRoute" array that interleaves the fuel stops 
+into the delivery route in the correct geographic/chronological position.
+Mark each fuel stop with a "*" suffix to distinguish them from delivery stops.
+
+For example, if route is "Spokane, WA -> Chicago, IL -> Spokane, WA" and fuel stops are 
+"Beach, ND" and "Edon, OH", the orderedRoute would be:
+["Spokane, WA", "Beach, ND*", "Edon, OH*", "Chicago, IL", "Spokane, WA"]
+
+Use the transaction dates and geographic knowledge to determine the correct position of each 
+fuel stop. A fuel stop dated 11.01 that is geographically between stop A and stop B should be 
+placed between A and B. If the driver visits a city multiple times (round trip), place each 
+fuel stop in the correct leg based on its date."""
+            ordering_instruction = ',\n  "orderedRoute": ["Spokane, WA", "Beach, ND*", "Chicago, IL", "Spokane, WA"]'
 
         content.append({
             "type": "text",
@@ -1205,14 +1221,17 @@ IMPORTANT for fuel card transaction reports (tables):
 - For the "paid" field: use the "Disc PPU" (discounted price per unit) column multiplied by gallons if available. If there is no Disc PPU column, use the Amount column.
 - Extract one entry per transaction row.
 - Do NOT include summary/total rows.
+- Sort entries by date (earliest first).
 
 For individual receipts:
 - Extract the total gallons and total amount paid from each receipt.
 
 If a field is not visible or unclear, use empty string "".
 {route_context}
-Return ONLY a JSON array, no other text:
-[{{"date": "11.01", "city": "Beach", "state": "ND", "gallons": "85", "paid": "275.50"}}]"""
+Return ONLY valid JSON, no other text:
+{{
+  "entries": [{{"date": "11.01", "city": "Beach", "state": "ND", "gallons": "85", "paid": "275.50"}}]{ordering_instruction}
+}}"""
         })
 
         import json
@@ -1244,23 +1263,30 @@ Return ONLY a JSON array, no other text:
             if b.get('type') == 'text'
         )
 
-        logger.info(f"[ReceiptScan] Claude response: {text[:500]}")
+        logger.info(f"[ReceiptScan] Claude response: {text[:800]}")
 
         import re
         text = text.strip()
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text).strip()
 
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            text = match.group(0)
+        parsed = json.loads(text)
 
-        entries = json.loads(text)
+        # Handle both formats: { entries: [...], orderedRoute: [...] } or just [...]
+        if isinstance(parsed, list):
+            entries = parsed
+            ordered_route = []
+        elif isinstance(parsed, dict):
+            entries = parsed.get('entries', [])
+            ordered_route = parsed.get('orderedRoute', [])
+        else:
+            entries = []
+            ordered_route = []
 
         if not isinstance(entries, list):
             entries = [entries]
 
-        # Validate and clean — only include entries with city AND state
+        # Validate and clean
         cleaned = []
         for entry in entries:
             city = str(entry.get('city', '')).strip()
@@ -1274,11 +1300,13 @@ Return ONLY a JSON array, no other text:
                     'paid': str(entry.get('paid', '')).strip(),
                 })
 
-        logger.info(f"[ReceiptScan] Extracted {len(cleaned)} fuel entries")
+        logger.info(f"[ReceiptScan] Extracted {len(cleaned)} fuel entries, orderedRoute has {len(ordered_route)} stops")
 
-        return create_response("success", f"Extracted {len(cleaned)} entries", data={
-            "entries": cleaned
-        })
+        response_data = {"entries": cleaned}
+        if ordered_route:
+            response_data["orderedRoute"] = ordered_route
+
+        return create_response("success", f"Extracted {len(cleaned)} entries", data=response_data)
 
     except json.JSONDecodeError as e:
         logger.error(f"[ReceiptScan] JSON parse error: {e}")
@@ -1290,7 +1318,6 @@ Return ONLY a JSON array, no other text:
     except Exception as e:
         logger.error(f"[ReceiptScan] Error: {e}", exc_info=True)
         return create_response("error", str(e), status_code=500)
-    
     
 # =============================================================================
 # ROUTES: DEBUG
