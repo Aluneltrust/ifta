@@ -64,7 +64,7 @@ CORS(app,
      resources={r"/api/*": {"origins": "*"}},
      allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
      supports_credentials=True,
-     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"])
+     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"]
 
 @app.before_request
 def handle_preflight():
@@ -72,7 +72,7 @@ def handle_preflight():
         response = app.make_default_options_response()
         headers = response.headers
         headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
-        headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
         headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept, Origin, X-Requested-With'
         headers['Access-Control-Allow-Credentials'] = 'true'
         headers['Access-Control-Max-Age'] = '3600'
@@ -82,7 +82,7 @@ def handle_preflight():
 def after_request(response):
     origin = request.headers.get('Origin', '*')
     response.headers['Access-Control-Allow-Origin'] = origin
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS, PATCH'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept, Origin, X-Requested-With'
     response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
