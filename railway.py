@@ -1313,7 +1313,7 @@ def scan_receipt():
         return create_response("error", f"Server error: {str(e)}", status_code=500)
     
 
-    
+
 # =============================================================================
 # ROUTES: LOADBOARD
 # =============================================================================
@@ -1430,6 +1430,7 @@ def post_load():
         contact_phone = data.get('contact_phone', '').strip() or None
         contact_email = data.get('contact_email', '').strip() or None
         notes = data.get('notes', '').strip() or None
+        company_name = data.get('company_name', '').strip() or None
 
         if rate_type not in ('flat', 'per_mile'):
             rate_type = 'flat'
@@ -1452,6 +1453,7 @@ def post_load():
             contact_phone=contact_phone,
             contact_email=contact_email,
             notes=notes,
+            company_name=company_name,
         )
 
         if not load:
@@ -1567,6 +1569,7 @@ def edit_load(load_id):
             contact_phone=data.get('contact_phone', '').strip() or None,
             contact_email=data.get('contact_email', '').strip() or None,
             notes=data.get('notes', '').strip() or None,
+            company_name=data.get('company_name', '').strip() or None,
         )
 
         if not load:
