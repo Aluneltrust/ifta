@@ -64,7 +64,7 @@ CORS(app,
      resources={r"/api/*": {"origins": "*"}},
      allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "X-Requested-With"],
      supports_credentials=True,
-     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE", "PATCH"]
+     methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"])
 
 @app.before_request
 def handle_preflight():
