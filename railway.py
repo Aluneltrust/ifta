@@ -1312,17 +1312,10 @@ def scan_receipt():
         logger.error(f"[ReceiptScan] UNEXPECTED ERROR: {e}\n{tb}")
         return create_response("error", f"Server error: {str(e)}", status_code=500)
     
+
+    
 # =============================================================================
 # ROUTES: LOADBOARD
-# =============================================================================
-# Paste this entire section into railway.py, just before the ERROR HANDLERS section.
-# Also add this import at the top of railway.py (with the other database imports):
-#
-
-#
-# And in init_database() at the bottom of database.py, add:
-#   init_loads_table()   # <-- one line at the end of the try block
-#
 # =============================================================================
 
 VALID_EQUIPMENT_TYPES = [
@@ -1498,7 +1491,7 @@ def remove_load(load_id):
 
 @app.route('/api/loads/<int:load_id>/status', methods=['PATCH', 'OPTIONS'])
 @cross_origin()
-def update_load(load_id):
+def update_load_status_route(load_id):
     """Update load status (active/inactive). Only owner can update."""
     if request.method == 'OPTIONS':
         return '', 204
@@ -1520,6 +1513,68 @@ def update_load(load_id):
         return create_response("success", f"Load status updated to {status}", data={"load": serialize_load(load)})
     except Exception as e:
         logger.error(f"Error updating load {load_id}: {e}")
+        return create_response("error", "Failed to update load", status_code=500)
+
+
+@app.route('/api/loads/<int:load_id>', methods=['PUT', 'OPTIONS'])
+@cross_origin()
+def edit_load(load_id):
+    """Edit a load's full details. Only the owner can edit their load."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        email = _extract_token()
+        if not email:
+            return create_response("error", "Authentication required", status_code=401)
+
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No data provided", status_code=400)
+
+        origin_city = data.get('origin_city', '').strip()
+        origin_state = data.get('origin_state', '').strip().upper()
+        dest_city = data.get('dest_city', '').strip()
+        dest_state = data.get('dest_state', '').strip().upper()
+        pickup_date = data.get('pickup_date', '').strip()
+        equipment_type = data.get('equipment_type', '').strip()
+
+        if not all([origin_city, origin_state, dest_city, dest_state, pickup_date, equipment_type]):
+            return create_response("error", "Missing required fields", status_code=400)
+
+        if origin_state not in VALID_STATES or dest_state not in VALID_STATES:
+            return create_response("error", "Invalid state code", status_code=400)
+
+        if equipment_type not in VALID_EQUIPMENT_TYPES:
+            return create_response("error", f"Invalid equipment type", status_code=400)
+
+        from loads_db import update_load as db_update_load
+        load = db_update_load(
+            load_id=load_id,
+            poster_email=email,
+            origin_city=origin_city,
+            origin_state=origin_state,
+            dest_city=dest_city,
+            dest_state=dest_state,
+            pickup_date=pickup_date,
+            delivery_date=data.get('delivery_date') or None,
+            equipment_type=equipment_type,
+            weight=data.get('weight') or None,
+            length=data.get('length') or None,
+            commodity=data.get('commodity', '').strip() or None,
+            rate=data.get('rate') or None,
+            rate_type=data.get('rate_type', 'flat') if data.get('rate_type') in ('flat', 'per_mile') else 'flat',
+            contact_name=data.get('contact_name', '').strip() or None,
+            contact_phone=data.get('contact_phone', '').strip() or None,
+            contact_email=data.get('contact_email', '').strip() or None,
+            notes=data.get('notes', '').strip() or None,
+        )
+
+        if not load:
+            return create_response("error", "Load not found or you don't have permission to edit it", status_code=404)
+
+        return create_response("success", "Load updated successfully", data={"load": serialize_load(load)})
+    except Exception as e:
+        logger.error(f"Error editing load {load_id}: {e}")
         return create_response("error", "Failed to update load", status_code=500)
     
 # =============================================================================
