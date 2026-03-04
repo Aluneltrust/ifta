@@ -85,12 +85,19 @@ def init_database():
         conn.commit()
         cur.close()
         conn.close()
+
         logger.info("Database tables initialized successfully")
+
+        try:
+            from loads_db import init_loads_table
+            init_loads_table()
+            logger.info("Loads table initialized successfully")
+        except Exception as loads_err:
+            logger.error(f"Error initializing loads table: {loads_err}", exc_info=True)
+
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
-
-
 # =============================================================================
 # USERS
 # =============================================================================
