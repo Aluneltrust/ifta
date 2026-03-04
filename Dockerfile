@@ -15,7 +15,9 @@ COPY database.py .
 COPY email_service.py .
 COPY sms.py .
 COPY route_optimizer.py .
+COPY loads_db.py .
 
 EXPOSE ${PORT:-5000}
 
 CMD ["gunicorn", "railway:app", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "120"]
+
