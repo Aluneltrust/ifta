@@ -47,6 +47,14 @@ from sms import (
 from route_optimizer import optimize_stops
 
 
+from loads_db import (
+        init_loads_table,
+       create_load, get_all_active_loads, get_loads_by_email,
+       get_load_by_id, delete_load, update_load_status, serialize_load,
+    )
+
+
+
 # =============================================================================
 # APP CONFIGURATION
 # =============================================================================
@@ -1304,7 +1312,215 @@ def scan_receipt():
         logger.error(f"[ReceiptScan] UNEXPECTED ERROR: {e}\n{tb}")
         return create_response("error", f"Server error: {str(e)}", status_code=500)
     
+# =============================================================================
+# ROUTES: LOADBOARD
+# =============================================================================
+# Paste this entire section into railway.py, just before the ERROR HANDLERS section.
+# Also add this import at the top of railway.py (with the other database imports):
+#
 
+#
+# And in init_database() at the bottom of database.py, add:
+#   init_loads_table()   # <-- one line at the end of the try block
+#
+# =============================================================================
+
+VALID_EQUIPMENT_TYPES = [
+    'Dry Van', 'Reefer', 'Flatbed', 'Step Deck', 'Lowboy', 'RGN',
+    'Power Only', 'Car Hauler', 'Tanker', 'Hotshot', 'Conestoga', 'Other'
+]
+
+VALID_STATES = [
+    'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+    'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+    'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+    'VA','WA','WV','WI','WY'
+]
+
+
+@app.route('/api/loads', methods=['GET', 'OPTIONS'])
+@cross_origin()
+def get_loads():
+    """Get all active loads. Public endpoint - no auth required to browse."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        origin_state = request.args.get('origin_state', '').strip().upper() or None
+        dest_state = request.args.get('dest_state', '').strip().upper() or None
+        equipment_type = request.args.get('equipment_type', '').strip() or None
+        from_date = request.args.get('from_date', '').strip() or None
+
+        loads = get_all_active_loads(
+            origin_state=origin_state,
+            dest_state=dest_state,
+            equipment_type=equipment_type,
+            from_date=from_date
+        )
+        serialized = [serialize_load(l) for l in loads]
+
+        return create_response(
+            "success",
+            f"Retrieved {len(serialized)} active loads",
+            data={"loads": serialized, "count": len(serialized)}
+        )
+    except Exception as e:
+        logger.error(f"Error getting loads: {e}")
+        return create_response("error", "Failed to retrieve loads", status_code=500)
+
+
+@app.route('/api/loads/my', methods=['GET', 'OPTIONS'])
+@cross_origin()
+def get_my_loads():
+    """Get loads posted by the authenticated user."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        email = _extract_token()
+        if not email:
+            return create_response("error", "Authentication required", status_code=401)
+
+        loads = get_loads_by_email(email)
+        serialized = [serialize_load(l) for l in loads]
+
+        return create_response(
+            "success",
+            f"Retrieved {len(serialized)} loads",
+            data={"loads": serialized, "count": len(serialized)}
+        )
+    except Exception as e:
+        logger.error(f"Error getting my loads: {e}")
+        return create_response("error", "Failed to retrieve your loads", status_code=500)
+
+
+@app.route('/api/loads', methods=['POST'])
+@cross_origin()
+@rate_limit(max_requests=20, window_seconds=3600)
+def post_load():
+    """Post a new load. Requires authentication."""
+    try:
+        email = _extract_token()
+        if not email:
+            return create_response("error", "Authentication required", status_code=401)
+
+        data = request.get_json()
+        if not data:
+            return create_response("error", "No data provided", status_code=400)
+
+        # Required fields
+        origin_city = data.get('origin_city', '').strip()
+        origin_state = data.get('origin_state', '').strip().upper()
+        dest_city = data.get('dest_city', '').strip()
+        dest_state = data.get('dest_state', '').strip().upper()
+        pickup_date = data.get('pickup_date', '').strip()
+        equipment_type = data.get('equipment_type', '').strip()
+
+        if not all([origin_city, origin_state, dest_city, dest_state, pickup_date, equipment_type]):
+            return create_response("error", "Missing required fields: origin_city, origin_state, dest_city, dest_state, pickup_date, equipment_type", status_code=400)
+
+        if origin_state not in VALID_STATES:
+            return create_response("error", f"Invalid origin state: {origin_state}", status_code=400)
+
+        if dest_state not in VALID_STATES:
+            return create_response("error", f"Invalid destination state: {dest_state}", status_code=400)
+
+        if equipment_type not in VALID_EQUIPMENT_TYPES:
+            return create_response("error", f"Invalid equipment type. Must be one of: {', '.join(VALID_EQUIPMENT_TYPES)}", status_code=400)
+
+        # Optional fields
+        delivery_date = data.get('delivery_date') or None
+        weight = data.get('weight') or None
+        length = data.get('length') or None
+        commodity = data.get('commodity', '').strip() or None
+        rate = data.get('rate') or None
+        rate_type = data.get('rate_type', 'flat')
+        contact_name = data.get('contact_name', '').strip() or None
+        contact_phone = data.get('contact_phone', '').strip() or None
+        contact_email = data.get('contact_email', '').strip() or None
+        notes = data.get('notes', '').strip() or None
+
+        if rate_type not in ('flat', 'per_mile'):
+            rate_type = 'flat'
+
+        load = create_load(
+            poster_email=email,
+            origin_city=origin_city,
+            origin_state=origin_state,
+            dest_city=dest_city,
+            dest_state=dest_state,
+            pickup_date=pickup_date,
+            delivery_date=delivery_date,
+            equipment_type=equipment_type,
+            weight=weight,
+            length=length,
+            commodity=commodity,
+            rate=rate,
+            rate_type=rate_type,
+            contact_name=contact_name,
+            contact_phone=contact_phone,
+            contact_email=contact_email,
+            notes=notes,
+        )
+
+        if not load:
+            return create_response("error", "Failed to create load", status_code=500)
+
+        return create_response(
+            "success",
+            "Load posted successfully",
+            data={"load": serialize_load(load)},
+            status_code=201
+        )
+    except Exception as e:
+        logger.error(f"Error posting load: {e}")
+        return create_response("error", "Failed to post load", status_code=500)
+
+
+@app.route('/api/loads/<int:load_id>', methods=['DELETE', 'OPTIONS'])
+@cross_origin()
+def remove_load(load_id):
+    """Remove a load. Only the owner can remove their load."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        email = _extract_token()
+        if not email:
+            return create_response("error", "Authentication required", status_code=401)
+
+        success = delete_load(load_id, email)
+        if not success:
+            return create_response("error", "Load not found or you don't have permission to remove it", status_code=404)
+
+        return create_response("success", "Load removed successfully", data={"load_id": load_id})
+    except Exception as e:
+        logger.error(f"Error removing load {load_id}: {e}")
+        return create_response("error", "Failed to remove load", status_code=500)
+
+
+@app.route('/api/loads/<int:load_id>/status', methods=['PATCH', 'OPTIONS'])
+@cross_origin()
+def update_load(load_id):
+    """Update load status (active/inactive). Only owner can update."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        email = _extract_token()
+        if not email:
+            return create_response("error", "Authentication required", status_code=401)
+
+        data = request.get_json()
+        status = data.get('status', '').strip() if data else ''
+
+        if status not in ('active', 'inactive'):
+            return create_response("error", "Status must be 'active' or 'inactive'", status_code=400)
+
+        load = update_load_status(load_id, email, status)
+        if not load:
+            return create_response("error", "Load not found or you don't have permission to update it", status_code=404)
+
+        return create_response("success", f"Load status updated to {status}", data={"load": serialize_load(load)})
+    except Exception as e:
+        logger.error(f"Error updating load {load_id}: {e}")
+        return create_response("error", "Failed to update load", status_code=500)
     
 # =============================================================================
 # ROUTES: DEBUG
